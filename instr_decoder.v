@@ -14,6 +14,8 @@ module instruction_decoder (
     output wire       jalr,
     // load instruction: signal to memory to read from address in ALU output
     output wire       MemToReg,
+    // load instruction: read from memory
+    output wire       MemRead,
     // store instruction: signal to memory to write to address in ALU output
     output wire       MemWrite,
     // ALU source: signal to ALU to use immediate as second operand instead of register
@@ -29,8 +31,9 @@ module instruction_decoder (
 );
     assign branch   = (opcode == 7'b1100011); // B only
     assign jal      = (opcode == 7'b1101111); // J only
-    assign jalr     = (opcode == 7'b1100111); // Jalr (I) only
-    assign MemToReg = (opcode == 7'b0000011); // Load (I) only 
+    assign jalr     = (opcode == 7'b1100111); // Jalr only
+    assign MemToReg = (opcode == 7'b0000011); // Load only
+    assign MemRead  = (opcode == 7'b0000011); // Load only
     assign MemWrite = (opcode == 7'b0100011); // Store (S) only
     // 0 only if R or B type, 1 otherwise
     assign alu_src  = (opcode != 7'b0110011) && (opcode != 7'b1100011);
