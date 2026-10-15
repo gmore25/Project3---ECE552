@@ -2,7 +2,7 @@
 
 // handles data load complications (formatting resultant data)
 module load_formatter (
-    input  wire [ 3:0] funct3,
+    input  wire [ 2:0] funct3,
     input  wire [31:0] i_data,
     input  wire [ 3:0] dmem_mask,
     output wire [31:0] o_data

@@ -4,7 +4,7 @@
 // additionally for store: does data shifting to align to correct byte/hw 
 // note: this handles data alignment for Store. For Load, that has to be handled mem read side.
 module dmem_adapter (
-    input  wire [ 3:0] funct3,
+    input  wire [ 2:0] funct3,
     input  wire [31:0] i_addr,
     input  wire [31:0] i_data,
     output wire [ 3:0] dmem_mask,
