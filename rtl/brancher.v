@@ -18,7 +18,7 @@ module brancher (
     // note signed and unsigned logic is the same here: 
     // that nuance should be handled in the ALU
     assign next_pc = 
-        jalr ? alu_out :
+        jalr ? {alu_out[31:1], 1'b0} : // jalr target is ALU output, but LSB is always 0
         jal  ? pcpimm :
         (branch && funct3 == 3'b000 && eq)   ? pcpimm : // beq
         (branch && funct3 == 3'b001 && !eq)  ? pcpimm : // bne
