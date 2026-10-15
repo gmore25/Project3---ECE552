@@ -131,19 +131,12 @@ module hart #(
     ,`RVFI_OUTPUTS,
 `endif
 );
-    /////////////////////////////////////////////////////////////
-    // Gauri More
-    /////////////////////////////////////////////////////////////
     // PC & INSTRUCTION FETCH
     reg [31:0] pc;
     wire [31:0] pc_plus4;
     wire [31:0] next_pc;
 
     assign pc_plus4 = pc + 32'd4; // calculate next PC
-
-    // Temporary: sequential execution only!!!!!
-    // need to replace this with branch/jump selection.
-    assign next_pc = pc_plus4;
 
     always @(posedge i_clk) begin
         if (i_rst)
@@ -167,6 +160,19 @@ module hart #(
     wire [4:0] rs2;
     wire [6:0] funct7;
 
+    // BRANCH AND JUMP TARGETS
+    wire [31:0] pc_plus_imm;
+    wire branch;
+    wire jal;
+    wire jalr;
+
+    wire mem_to_reg;
+    wire mem_read;
+    wire mem_write;
+    wire alu_src;
+    wire decoder_reg_write;
+
+    assign pc_plus_imm = pc + immediate;
     assign opcode = instr[6:0];
     assign rd     = instr[11:7];
     assign funct3 = instr[14:12];
@@ -186,17 +192,38 @@ module hart #(
     wire [5:0] inst_format;
     wire [31:0] immediate;
 
-    // Temporary format decoder for R/I arithmetic.
-    // need to update this when integrating other instruction types!!!!!
-    assign inst_format =
-        is_rtype     ? 6'b000001 :
-        is_itype_alu ? 6'b000010 :
-                       6'b000000;
+    // IMMEDIATE FORMAT DECODER
+    imm_format u_imm_format (
+        .opcode(opcode),
+        .imm_format(inst_format)
+    );
 
     imm u_imm (
         .i_inst(instr),
         .i_format(inst_format),
         .o_immediate(immediate)
+    );
+
+    instruction_decoder u_decoder (
+        .opcode(opcode),
+        .funct3(funct3),
+        .funct7(funct7),
+
+        .branch(branch),
+        .jal(jal),
+        .jalr(jalr),
+
+        .MemToReg(mem_to_reg),
+        .MemRead(mem_read),
+        .MemWrite(mem_write),
+
+        .alu_src(alu_src),
+        .RegWrite(decoder_reg_write),
+
+        .alu_unsigned(alu_unsigned),
+        .alu_sub(alu_sub),
+        .alu_arith(alu_arith),
+        .alu_sel(alu_opsel)
     );
 
     // REGISTER FILE READ AND WRITE SIGNALS
@@ -258,10 +285,14 @@ module hart #(
     wire alu_eq;
     wire alu_slt;
 
-    assign alu_operand_a = rs1_data;
+    op1_selector u_op1_selector (
+        .opcode(opcode),
+        .pc(pc),
+        .r1_data(rs1_data),
+        .op1(alu_operand_a)
+    );
 
-    assign alu_operand_b =
-        is_itype_alu ? immediate : rs2_data;
+    assign alu_operand_b = alu_src ? immediate : rs2_data;
 
     alu u_alu (
         .i_opsel(alu_opsel),
@@ -277,23 +308,32 @@ module hart #(
         .o_slt(alu_slt)
     );
 
-    // TEMPORARY ARITHMETIC WRITEBACK!!!!! 
-    // waiting for loads, jumps, and the writeback MUX
-    // they must replace these assignments with the final register-write enable and selected writeback data.
-    // Do not keep two assignments driving reg_write_data.
+    // Connecting brancher.v
+    brancher u_brancher (
+        .branch(branch),
+        .jal(jal),
+        .jalr(jalr),
+
+        .slt(alu_slt),
+        .eq(alu_eq),
+        .funct3(funct3),
+
+        .pcp4(pc_plus4),
+        .pcpimm(pc_plus_imm),
+        .alu_out(alu_result),
+
+        .next_pc(next_pc)
+    );
+
+    // TEMPORARY: arithmetic instructions only.
+    // Replace when the final writeback MUX is done.
     assign reg_write_en =
-        !i_rst && (is_rtype || is_itype_alu);
+        !i_rst &&
+        decoder_reg_write &&
+        (is_rtype || is_itype_alu);
 
     assign reg_write_data = alu_result;
-
-    /////////////////////////////////////////////////////////////
-    // Gauri More
-    /////////////////////////////////////////////////////////////
-
-    // What's left?
-    // Person 2	--> Branches, JAL/JALR, LUI/AUIPC, final next-PC logic
-    // Person 3	--> Loads/stores, byte masks, sign extension, final writeback MUX, retire outputs, integration/testing
-    // Everyone	--> Full RV32I tests, illegal instruction handling, ebreak, debugging, submission
+    
 
 endmodule
 

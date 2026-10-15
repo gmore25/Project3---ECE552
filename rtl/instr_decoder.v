@@ -38,7 +38,25 @@ module instruction_decoder (
     // 0 only if R or B type, 1 otherwise
     assign alu_src  = (opcode != 7'b0110011) && (opcode != 7'b1100011);
     // 0 only if S or B type, 1 otherwise
-    assign RegWrite = (opcode != 7'b0100011) && (opcode != 7'b1100011);
+    assign RegWrite =
+        (opcode == 7'b0110011) || // R-type
+        (opcode == 7'b0010011) || // Arithmetic I-type
+        (opcode == 7'b0000011) || // Load
+        (opcode == 7'b0110111) || // LUI
+        (opcode == 7'b0010111) || // AUIPC
+        (opcode == 7'b1101111) || // JAL
+        (opcode == 7'b1100111);   // JALR
+
+    assign alu_sub =
+        (opcode == 7'b0110011) &&
+        (funct3 == 3'b000) &&
+        (funct7 == 7'b0100000);
+
+    assign alu_arith =
+        ((opcode == 7'b0110011) ||
+        (opcode == 7'b0010011)) &&
+        (funct3 == 3'b101) &&
+        (funct7 == 7'b0100000);
     // funct3 bits that denote unsigned different between SLT(I)U and BLTU/BGEU
     assign alu_unsigned = 
         ((opcode == 7'b0010011 || opcode == 7'b0110011) && funct3 == 3'b011) || // SLT(I)U 
