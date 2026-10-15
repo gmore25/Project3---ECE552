@@ -1,0 +1,11 @@
+# modelsim files
+*.mti
+*.mpf
+transcript
+vsim.wlf
+_*
+
+# ASM compiled files
+program.mem
+*.hex
+*.o
