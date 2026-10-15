@@ -27,7 +27,6 @@ module instruction_decoder (
     output wire       alu_sub,
     output wire       alu_arith,
     output wire [2:0] alu_sel
-    // TODO: additional output to detect illegal instructions?
 );
     assign branch   = (opcode == 7'b1100011); // B only
     assign jal      = (opcode == 7'b1101111); // J only
@@ -58,7 +57,7 @@ module instruction_decoder (
         (funct3 == 3'b101) &&
         (funct7 == 7'b0100000);
     // funct3 bits that denote unsigned different between SLT(I)U and BLTU/BGEU
-    assign alu_unsigned = 
+    assign alu_unsigned =
         ((opcode == 7'b0010011 || opcode == 7'b0110011) && funct3 == 3'b011) || // SLT(I)U 
         (opcode == 7'b1100011 && funct3[2:1] == 2'b11);   // BLT/GEU    
     // assign alu_sub = (opcode == 7'b0110011) && (funct7 == 7'b0100000); // SUB only for R-type

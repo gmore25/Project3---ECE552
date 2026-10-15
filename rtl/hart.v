@@ -209,6 +209,12 @@ module hart #(
     wire alu_sub;
     wire alu_unsigned;
     wire alu_arith;
+    wire illegal_instr;
+
+    instruction_checker u_instr_checker (
+        .instr(instr),
+        .illegal_instr(illegal_instr)
+    );
 
     instruction_decoder u_decoder (
         .opcode(opcode),
@@ -306,6 +312,14 @@ module hart #(
 
     // MEMORY INTERFACE ********
 
+    wire misaligned_access;
+    alignment_checker u_alignment_checker (
+        .opcode(opcode),
+        .funct3(funct3),
+        .i_addr(alu_result),
+        .misaligned_access(misaligned_access)
+    );
+
     // mask and aligning for store and load
     dmem_adapter u_dmem_adapter (
         .funct3(funct3),
@@ -334,7 +348,26 @@ module hart #(
 
     assign reg_write_data = alu_result;
     
+    // per instructions: " For project 3, your single cycle processor should assert o_retire_valid every cycle."
+    assign o_retire_valid = 1'b1;
 
+    wire misaligned_nextpc;
+    assign misaligned_nextpc = (next_pc[1:0] != 2'b00);
+
+    // more complex logic for o_retire_trap and o_retire_halt:
+    assign o_retire_trap = misaligned_access || illegal_instr || misaligned_nextpc; // placeholder
+    assign o_retire_halt = (opcode == 7'b1110011); // check if ebreak
+
+    // pipe along rest of the retire values:
+    assign o_retire_inst = instr;
+    assign o_retire_rs1_raddr = rs1;
+    assign o_retire_rs2_raddr = rs2;
+    assign o_retire_rs1_rdata = rs1_data;
+    assign o_retire_rs2_rdata = rs2_data;
+    assign o_retire_rd_waddr = rd;
+    assign o_retire_rd_wdata = reg_write_data;
+    assign o_retire_pc = pc;
+    assign o_retire_next_pc = next_pc;
 endmodule
 
 `default_nettype wire
