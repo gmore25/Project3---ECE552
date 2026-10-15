@@ -1,3 +1,4 @@
+// turn opcode into one hot immediate format selection signal
 module imm_format(
     input  wire [6:0] opcode,
     output wire [5:0] imm_format
