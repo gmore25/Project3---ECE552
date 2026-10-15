@@ -172,7 +172,6 @@ module hart #(
     wire alu_src;
     wire decoder_reg_write;
 
-    assign pc_plus_imm = pc + immediate;
     assign opcode = instr[6:0];
     assign rd     = instr[11:7];
     assign funct3 = instr[14:12];
@@ -191,6 +190,7 @@ module hart #(
     // connecting the imm.v file to get immediate values for the instruction
     wire [5:0] inst_format;
     wire [31:0] immediate;
+    assign pc_plus_imm = pc + immediate;
 
     // IMMEDIATE FORMAT DECODER
     imm_format u_imm_format (
@@ -203,6 +203,12 @@ module hart #(
         .i_format(inst_format),
         .o_immediate(immediate)
     );
+
+    // ALU CONTROL SIGNALS ******
+    wire [2:0] alu_opsel;
+    wire alu_sub;
+    wire alu_unsigned;
+    wire alu_arith;
 
     instruction_decoder u_decoder (
         .opcode(opcode),
@@ -250,33 +256,6 @@ module hart #(
         .i_rd_wdata(reg_write_data)
     );
 
-    // ALU CONTROL SIGNALS ******
-    wire [2:0] alu_opsel;
-    wire alu_sub;
-    wire alu_unsigned;
-    wire alu_arith;
-
-    // Make sure the final ALU decoder supports non-arithmetic instructions!!!!
-    // Fine for R-type and arithmetic I-type instructions, but it won't be correct for loads, 
-    // stores, or address calculations in general. During integration, those operations must select 
-    // ADD regardless of their funct3 values.
-    assign alu_opsel = funct3;
-
-    // SUB only exists in the R-type arithmetic group.
-    assign alu_sub =
-        is_rtype &&
-        (funct3 == 3'b000) &&
-        (funct7 == 7'b0100000);
-
-    // SLTU and SLTIU use unsigned comparison.
-    assign alu_unsigned = (funct3 == 3'b011);
-
-    // SRA/SRAI have bit 30 set.
-    assign alu_arith =
-    (funct3 == 3'b101) &&
-    (is_rtype || is_itype_alu) &&
-    (funct7 == 7'b0100000);
-
     // ALU EXECUTION ********
     wire [31:0] alu_operand_a;
     wire [31:0] alu_operand_b;
@@ -323,6 +302,27 @@ module hart #(
         .alu_out(alu_result),
 
         .next_pc(next_pc)
+    );
+
+    // MEMORY INTERFACE ********
+
+    // mask and aligning for store and load
+    dmem_adapter u_dmem_adapter (
+        .funct3(funct3),
+        .i_addr(alu_result),
+        .i_data(rs2_data),
+        .dmem_mask(o_dmem_mask),
+        .o_addr(o_dmem_addr),
+        .o_data(o_dmem_wdata)
+    );
+
+    // loaded value formatting (sign/zero extend, shift to correct byte)
+    wire [31:0] load_data;
+    load_formatter u_load_formatter (
+        .funct3(funct3),
+        .i_data(i_dmem_rdata),
+        .dmem_mask(o_dmem_mask),
+        .o_data(load_data)
     );
 
     // TEMPORARY: arithmetic instructions only.
