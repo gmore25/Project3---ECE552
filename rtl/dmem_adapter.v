@@ -34,13 +34,13 @@ module dmem_adapter (
     // data to write is just the register value shifted to the correctly masked location:
     assign o_data =
         (funct3[1:0] == 2'b00) ? (
-            (addr_low == 2'b00) ? {24'b0, i_data[7:0]} :
-            (addr_low == 2'b01) ? {16'b0, i_data[7:0], 8'b0} :
-            (addr_low == 2'b10) ? {8'b0, i_data[7:0], 16'b0} :
+            (addr_low == 2'b00) ? i_data :
+            (addr_low == 2'b01) ? {i_data[23:0], 8'b0} :
+            (addr_low == 2'b10) ? {i_data[15:0], 16'b0} :
             {i_data[7:0], 24'b0}
         ) : // byte
         (funct3[1:0] == 2'b01) ? (
-            (addr_low == 2'b00) ? {16'b0, i_data[15:0]} :
+            (addr_low == 2'b00) ? i_data :
             {i_data[15:0], 16'b0}
         ) : // half-word
         i_data; // word
