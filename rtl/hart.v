@@ -167,8 +167,6 @@ module hart #(
     wire jalr;
 
     wire mem_to_reg;
-    wire mem_read;
-    wire mem_write;
     wire alu_src;
     wire decoder_reg_write;
 
@@ -226,8 +224,8 @@ module hart #(
         .jalr(jalr),
 
         .MemToReg(mem_to_reg),
-        .MemRead(mem_read),
-        .MemWrite(mem_write),
+        .MemRead(o_dmem_ren),
+        .MemWrite(o_dmem_wen),
 
         .alu_src(alu_src),
         .RegWrite(decoder_reg_write),
@@ -340,7 +338,7 @@ module hart #(
     );
 
     assign reg_write_en = decoder_reg_write;
-    assign reg_write_data = mem_to_reg ? load_data : alu_result;
+    assign reg_write_data = (jal || jalr) ? pc_plus4 : (mem_to_reg ? load_data : alu_result);
     
     // per instructions: " For project 3, your single cycle processor should assert o_retire_valid every cycle."
     assign o_retire_valid = 1'b1;
@@ -348,9 +346,8 @@ module hart #(
     wire misaligned_nextpc;
     assign misaligned_nextpc = (next_pc[1:0] != 2'b00);
 
-    // more complex logic for o_retire_trap and o_retire_halt:
-    assign o_retire_trap = misaligned_access || illegal_instr || misaligned_nextpc; // placeholder
-    assign o_retire_halt = (opcode == 7'b1110011); // check if ebreak
+    assign o_retire_trap = misaligned_access || illegal_instr || misaligned_nextpc; // illegal stuff
+    assign o_retire_halt = (instr == 32'h00100073); // ebreak
 
     // pipe along rest of the retire values:
     assign o_retire_inst = instr;
@@ -358,7 +355,7 @@ module hart #(
     assign o_retire_rs2_raddr = rs2;
     assign o_retire_rs1_rdata = rs1_data;
     assign o_retire_rs2_rdata = rs2_data;
-    assign o_retire_rd_waddr = rd;
+    assign o_retire_rd_waddr = reg_write_en ? rd : 5'b0;
     assign o_retire_rd_wdata = reg_write_data;
     assign o_retire_pc = pc;
     assign o_retire_next_pc = next_pc;

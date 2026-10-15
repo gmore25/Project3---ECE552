@@ -30,7 +30,7 @@ module instruction_checker (
             (funct3 != 3'b000) : 
         ((opcode == 7'b0110111) || (opcode == 7'b0010111) || (opcode == 7'b1101111)) ? // U/J (always good)
             1'b0 : 
-        (opcode == 7'b1110011) ? (instr != 32'h00000073) : // EBREAK is all 0 except opcode according to spec
+        (opcode == 7'b1110011) ? (instr != 32'h00100073) : 
             1'b1; // Unsupported opcode
 endmodule
 
