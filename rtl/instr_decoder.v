@@ -61,8 +61,8 @@ module instruction_decoder (
     assign alu_unsigned = 
         ((opcode == 7'b0010011 || opcode == 7'b0110011) && funct3 == 3'b011) || // SLT(I)U 
         (opcode == 7'b1100011 && funct3[2:1] == 2'b11);   // BLT/GEU    
-    assign alu_sub = (opcode == 7'b0110011) && (funct7 == 7'b0100000); // SUB only for R-type
-    assign alu_arith = (opcode == 7'b0110011 || opcode == 7'b0010011) && (funct7 == 7'b0100000); // R/I type
-    // R/I type: funct3, else default to ADD for other types (r[rs1] + imm for L, S, Jalr -- unused for rest (J/U))
+    // assign alu_sub = (opcode == 7'b0110011) && (funct7 == 7'b0100000); // SUB only for R-type
+    // assign alu_arith = (opcode == 7'b0110011 || opcode == 7'b0010011) && (funct7 == 7'b0100000); // R/I type
+    // R/I type: funct3, else default to ADD for other types (r[rs1] + imm for L, S, U, Jalr -- unused for rest J atm but this might change)
     assign alu_sel = (opcode == 7'b0110011 || opcode == 7'b0010011) ?  funct3 : 3'b000;
 endmodule
