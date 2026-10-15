@@ -339,14 +339,8 @@ module hart #(
         .o_data(load_data)
     );
 
-    // TEMPORARY: arithmetic instructions only.
-    // Replace when the final writeback MUX is done.
-    assign reg_write_en =
-        !i_rst &&
-        decoder_reg_write &&
-        (is_rtype || is_itype_alu);
-
-    assign reg_write_data = alu_result;
+    assign reg_write_en = decoder_reg_write;
+    assign reg_write_data = mem_to_reg ? load_data : alu_result;
     
     // per instructions: " For project 3, your single cycle processor should assert o_retire_valid every cycle."
     assign o_retire_valid = 1'b1;
