@@ -121,6 +121,12 @@ module hart #(
     output wire [31:0] o_retire_rd_wdata,
     // The current program counter of the instruction being retired - i.e.
     // the instruction memory address that the instruction was fetched from.
+    output wire [31:0] o_retire_dmem_addr,
+    output wire [3:0] o_retire_dmem_mask,
+    output wire o_retire_dmem_ren,
+    output wire o_retire_dmem_wen,
+    output wire [31:0] o_retire_dmem_rdata,
+    output wire [31:0] o_retire_dmem_wdata,
     output wire [31:0] o_retire_pc,
     // the next program counter after the instruction is retired. For most
     // instructions, this is `o_retire_pc + 4`, but must be the branch or jump
@@ -131,234 +137,224 @@ module hart #(
     ,`RVFI_OUTPUTS,
 `endif
 );
-    // PC & INSTRUCTION FETCH
+
+    localparam [31:0] NOP = 32'h00000013;
     reg [31:0] pc;
-    wire [31:0] pc_plus4;
-    wire [31:0] next_pc;
-
-    assign pc_plus4 = pc + 32'd4; // calculate next PC
-
-    always @(posedge i_clk) begin
-        if (i_rst)
-            pc <= RESET_ADDR;
-        else
-            pc <= next_pc;
-    end
-
-    // Address sent to external instruction memory.
+    wire [31:0] pc_plus4 = pc + 32'd4;
     assign o_imem_raddr = pc;
 
-    // Instruction returned by external memory.
-    wire [31:0] instr;
-    assign instr = i_imem_rdata;
+    // PC & INSTRUCTION FETCH
+    // IF/ID holds the fetched instruction until the next stage can accept it.
+    reg if_valid;
+    reg [31:0] if_instr, if_pc;
+    wire [31:0] if_pc4 = if_pc + 32'd4;
 
     // INSTRUCTION DECODE FIELDS
-    wire [6:0] opcode;
-    wire [4:0] rd;
-    wire [2:0] funct3;
-    wire [4:0] rs1;
-    wire [4:0] rs2;
-    wire [6:0] funct7;
-
-    // BRANCH AND JUMP TARGETS
-    wire [31:0] pc_plus_imm;
-    wire branch;
-    wire jal;
-    wire jalr;
-
-    wire mem_to_reg;
-    wire alu_src;
-    wire decoder_reg_write;
-
-    assign opcode = instr[6:0];
-    assign rd     = instr[11:7];
-    assign funct3 = instr[14:12];
-    assign rs1    = instr[19:15];
-    assign rs2    = instr[24:20];
-    assign funct7 = instr[31:25];
-
-    // RV32I instruction classes.
-    wire is_rtype;
-    wire is_itype_alu;
-
-    assign is_rtype     = (opcode == 7'b0110011);
-    assign is_itype_alu = (opcode == 7'b0010011);
-
-    // CONNECT IMMEDIATE VALUES FROM imm.v MODULE
+    wire [31:0] instr = if_instr;
+    wire [6:0] opcode = instr[6:0];
+    wire [4:0] rs1 = instr[19:15], rs2 = instr[24:20], rd = instr[11:7];
+    wire [2:0] funct3 = instr[14:12];
+    wire [6:0] funct7 = instr[31:25];
     // connecting the imm.v file to get immediate values for the instruction
-    wire [5:0] inst_format;
+    wire [5:0] fmt;
     wire [31:0] immediate;
-    assign pc_plus_imm = pc + immediate;
+    imm_format u_fmt (.opcode(opcode), .imm_format(fmt));
+    imm u_imm (.i_inst(instr), .i_format(fmt), .o_immediate(immediate));
 
-    // IMMEDIATE FORMAT DECODER
-    imm_format u_imm_format (
-        .opcode(opcode),
-        .imm_format(inst_format)
+    wire dec_branch, dec_jal, dec_jalr, dec_m2r, dec_mread, dec_mwrite;
+    wire dec_asrc, dec_rwrite, dec_uns, dec_sub, dec_arith;
+    wire [2:0] dec_alu_sel;
+    instruction_decoder u_dec (
+        .opcode(opcode), .funct3(funct3), .funct7(funct7),
+        .branch(dec_branch), .jal(dec_jal), .jalr(dec_jalr),
+        .MemToReg(dec_m2r), .MemRead(dec_mread), .MemWrite(dec_mwrite),
+        .alu_src(dec_asrc), .RegWrite(dec_rwrite),
+        .alu_unsigned(dec_uns), .alu_sub(dec_sub), .alu_arith(dec_arith),
+        .alu_sel(dec_alu_sel)
     );
-
-    imm u_imm (
-        .i_inst(instr),
-        .i_format(inst_format),
-        .o_immediate(immediate)
-    );
-
-    // ALU CONTROL SIGNALS ******
-    wire [2:0] alu_opsel;
-    wire alu_sub;
-    wire alu_unsigned;
-    wire alu_arith;
-    wire illegal_instr;
-
-    instruction_checker u_instr_checker (
-        .instr(instr),
-        .illegal_instr(illegal_instr)
-    );
-
-    instruction_decoder u_decoder (
-        .opcode(opcode),
-        .funct3(funct3),
-        .funct7(funct7),
-
-        .branch(branch),
-        .jal(jal),
-        .jalr(jalr),
-
-        .MemToReg(mem_to_reg),
-        .MemRead(o_dmem_ren),
-        .MemWrite(o_dmem_wen),
-
-        .alu_src(alu_src),
-        .RegWrite(decoder_reg_write),
-
-        .alu_unsigned(alu_unsigned),
-        .alu_sub(alu_sub),
-        .alu_arith(alu_arith),
-        .alu_sel(alu_opsel)
-    );
+    wire dec_illegal;
+    instruction_checker u_chk (.instr(instr), .illegal_instr(dec_illegal));
+    wire uses_rs1 = (opcode == 7'b0110011 || opcode == 7'b0010011 ||
+                     opcode == 7'b0000011 || opcode == 7'b0100011 ||
+                     opcode == 7'b1100011 || opcode == 7'b1100111);
+    wire uses_rs2 = (opcode == 7'b0110011 || opcode == 7'b0100011 ||
+                     opcode == 7'b1100011);
 
     // REGISTER FILE READ AND WRITE SIGNALS
-    wire [31:0] rs1_data;
-    wire [31:0] rs2_data;
+    wire [31:0] wb_value;
+    wire wb_wen;
+    reg wb_valid, wb_rwrite, wb_m2r, wb_jlink, wb_trap, wb_halt;
+    reg [31:0] wb_pc, wb_nextpc, wb_inst, wb_alu, wb_load, wb_pc4;
+    reg [31:0] wb_rs1data, wb_rs2data;
+    reg [4:0] wb_rs1, wb_rs2, wb_rd;
+    reg [31:0] wb_daddr, wb_dwdata, wb_drdata;
+    reg [3:0] wb_dmask;
+    reg wb_dren, wb_dwen;
+    assign wb_value = wb_jlink ? wb_pc4 : (wb_m2r ? wb_load : wb_alu);
+    assign wb_wen = wb_valid && wb_rwrite && !wb_trap && (wb_rd != 0);
 
-    wire        reg_write_en;
-    wire [31:0] reg_write_data;
-
-    rf #(
-        .BYPASS_EN(0)
-    ) u_rf (
-        .i_clk(i_clk),
-        .i_rst(i_rst),
-
-        .i_rs1_raddr(rs1),
-        .o_rs1_rdata(rs1_data),
-
-        .i_rs2_raddr(rs2),
-        .o_rs2_rdata(rs2_data),
-
-        .i_rd_wen(reg_write_en),
-        .i_rd_waddr(rd),
-        .i_rd_wdata(reg_write_data)
+    wire [31:0] rs1_data, rs2_data;
+    rf #(.BYPASS_EN(0)) u_rf (
+        .i_clk(i_clk), .i_rst(i_rst),
+        .i_rs1_raddr(rs1), .o_rs1_rdata(rs1_data),
+        .i_rs2_raddr(rs2), .o_rs2_rdata(rs2_data),
+        .i_rd_wen(wb_wen), .i_rd_waddr(wb_rd), .i_rd_wdata(wb_value)
     );
 
-    // ALU EXECUTION ********
-    wire [31:0] alu_operand_a;
-    wire [31:0] alu_operand_b;
-    wire [31:0] alu_result;
+    // ID/EX: register operands and control signals for execution.
+    reg ex_valid, ex_branch, ex_jal, ex_jalr, ex_m2r, ex_mread, ex_mwrite;
+    reg ex_asrc, ex_rwrite, ex_uns, ex_sub, ex_arith, ex_illegal, ex_halt;
+    reg [2:0] ex_alu_sel, ex_funct3;
+    reg [6:0] ex_opcode;
+    reg [4:0] ex_rs1, ex_rs2, ex_rd;
+    reg [31:0] ex_pc, ex_pc4, ex_inst, ex_imm, ex_rs1data, ex_rs2data;
 
-    wire alu_eq;
-    wire alu_slt;
+    // EX/MEM: hold ALU result and memory controls.
+    reg mem_valid, mem_m2r, mem_mread, mem_mwrite, mem_rwrite, mem_jlink;
+    reg mem_trap, mem_halt;
+    reg [2:0] mem_funct3;
+    reg [4:0] mem_rs1, mem_rs2, mem_rd;
+    reg [31:0] mem_pc, mem_pc4, mem_nextpc, mem_inst, mem_alu;
+    reg [31:0] mem_rs1data, mem_rs2data;
 
-    op1_selector u_op1_selector (
-        .opcode(opcode),
-        .pc(pc),
-        .r1_data(rs1_data),
-        .op1(alu_operand_a)
+    // Stall on RAW dependencies until the needed register value is written back.
+    wire hazard_ex = ex_valid && ex_rwrite && ex_rd != 0 &&
+        ((uses_rs1 && rs1 == ex_rd) || (uses_rs2 && rs2 == ex_rd));
+    wire hazard_mem = mem_valid && mem_rwrite && mem_rd != 0 &&
+        ((uses_rs1 && rs1 == mem_rd) || (uses_rs2 && rs2 == mem_rd));
+    wire hazard_wb = wb_valid && wb_rwrite && wb_rd != 0 &&
+        ((uses_rs1 && rs1 == wb_rd) || (uses_rs2 && rs2 == wb_rd));
+    wire stall = if_valid && (hazard_ex || hazard_mem || hazard_wb);
+
+    // ALU EXECUTION and branch/jump targets
+    wire [31:0] ex_op1, ex_op2, ex_alu_result;
+    wire ex_eq, ex_slt;
+    op1_selector u_op1 (
+        .opcode(ex_opcode), .pc(ex_pc), .r1_data(ex_rs1data), .op1(ex_op1)
     );
-
-    assign alu_operand_b = alu_src ? immediate : rs2_data;
-
+    assign ex_op2 = ex_asrc ? ex_imm : ex_rs2data;
     alu u_alu (
-        .i_opsel(alu_opsel),
-        .i_sub(alu_sub),
-        .i_unsigned(alu_unsigned),
-        .i_arith(alu_arith),
+        .i_opsel(ex_alu_sel), .i_sub(ex_sub),
+        .i_unsigned(ex_uns), .i_arith(ex_arith),
+        .i_op1(ex_op1), .i_op2(ex_op2),
+        .o_result(ex_alu_result), .o_eq(ex_eq), .o_slt(ex_slt)
+    );
+    wire [31:0] ex_target;
+    brancher u_branch (
+        .branch(ex_branch), .jal(ex_jal), .jalr(ex_jalr),
+        .slt(ex_slt), .eq(ex_eq), .funct3(ex_funct3),
+        .pcp4(ex_pc4), .pcpimm(ex_pc + ex_imm),
+        .alu_out(ex_alu_result), .next_pc(ex_target)
+    );
+    wire redirect = ex_valid && (ex_target != ex_pc4);
+    wire [31:0] ex_nextpc = ex_target;
+    wire ex_badalign;
+    alignment_checker u_align (
+        .opcode(ex_opcode), .funct3(ex_funct3),
+        .i_addr(ex_alu_result), .misaligned_access(ex_badalign)
+    );
+    wire ex_trap = ex_illegal || ex_badalign ||
+        ((ex_branch || ex_jal || ex_jalr) && ex_target[1:0] != 2'b00);
 
-        .i_op1(alu_operand_a),
-        .i_op2(alu_operand_b),
-
-        .o_result(alu_result),
-        .o_eq(alu_eq),
-        .o_slt(alu_slt)
+    // MEMORY INTERFACE: only valid instructions may read or write memory.
+    wire [31:0] mem_addr, mem_wdata, mem_load;
+    wire [3:0] mem_mask;
+    dmem_adapter u_adapter (
+        .funct3(mem_funct3), .i_addr(mem_alu), .i_data(mem_rs2data),
+        .dmem_mask(mem_mask), .o_addr(mem_addr), .o_data(mem_wdata)
+    );
+    assign o_dmem_addr = mem_addr;
+    assign o_dmem_mask = mem_mask;
+    assign o_dmem_wdata = mem_wdata;
+    assign o_dmem_ren = mem_valid && mem_mread && !mem_trap;
+    assign o_dmem_wen = mem_valid && mem_mwrite && !mem_trap;
+    load_formatter u_load (
+        .funct3(mem_funct3), .i_data(i_dmem_rdata),
+        .dmem_mask(mem_mask), .o_data(mem_load)
     );
 
-    // Connecting brancher.v
-    brancher u_brancher (
-        .branch(branch),
-        .jal(jal),
-        .jalr(jalr),
+    always @(posedge i_clk) begin
+        if (i_rst) begin
+            pc <= RESET_ADDR;
+            if_valid <= 0;
+            if_instr <= NOP;
+            if_pc <= 0;
+            ex_valid <= 0;
+            mem_valid <= 0;
+            wb_valid <= 0;
+        end else begin
+            // Redirect flushes wrong-path instructions; otherwise a stall holds IF/ID.
+            if (redirect) begin
+                pc <= ex_target;
+                if_valid <= 0;
+                if_instr <= NOP;
+            end else if (!stall) begin
+                pc <= pc_plus4;
+                if_pc <= pc;
+                if_instr <= i_imem_rdata;
+                if_valid <= 1;
+            end
 
-        .slt(alu_slt),
-        .eq(alu_eq),
-        .funct3(funct3),
+            // ID/EX: register operands and control signals for execution.: insert bubble on RAW stall or redirect.
+            if (redirect || stall) begin
+                ex_valid <= 0;
+            end else begin
+                ex_valid <= if_valid;
+                ex_pc <= if_pc; ex_pc4 <= if_pc4; ex_inst <= instr;
+                ex_imm <= immediate; ex_rs1data <= rs1_data; ex_rs2data <= rs2_data;
+                ex_rs1 <= rs1; ex_rs2 <= rs2; ex_rd <= rd;
+                ex_funct3 <= funct3; ex_opcode <= opcode;
+                ex_branch <= dec_branch; ex_jal <= dec_jal; ex_jalr <= dec_jalr;
+                ex_m2r <= dec_m2r; ex_mread <= dec_mread; ex_mwrite <= dec_mwrite;
+                ex_asrc <= dec_asrc; ex_rwrite <= dec_rwrite;
+                ex_uns <= dec_uns; ex_sub <= dec_sub; ex_arith <= dec_arith;
+                ex_alu_sel <= dec_alu_sel;
+                ex_illegal <= dec_illegal; ex_halt <= instr == 32'h00100073;
+            end
 
-        .pcp4(pc_plus4),
-        .pcpimm(pc_plus_imm),
-        .alu_out(alu_result),
+            // EX/MEM: hold ALU result and memory controls.
+            mem_valid <= ex_valid;
+            mem_pc <= ex_pc; mem_pc4 <= ex_pc4; mem_inst <= ex_inst;
+            mem_nextpc <= ex_nextpc; mem_alu <= ex_alu_result;
+            mem_rs1data <= ex_rs1data; mem_rs2data <= ex_rs2data;
+            mem_rs1 <= ex_rs1; mem_rs2 <= ex_rs2; mem_rd <= ex_rd;
+            mem_funct3 <= ex_funct3;
+            mem_m2r <= ex_m2r; mem_mread <= ex_mread; mem_mwrite <= ex_mwrite;
+            mem_rwrite <= ex_rwrite; mem_jlink <= ex_jal || ex_jalr;
+            mem_trap <= ex_trap; mem_halt <= ex_halt;
 
-        .next_pc(next_pc)
-    );
+            // MEM/WB
+            wb_valid <= mem_valid;
+            wb_pc <= mem_pc; wb_pc4 <= mem_pc4; wb_inst <= mem_inst;
+            wb_nextpc <= mem_nextpc; wb_alu <= mem_alu; wb_load <= mem_load;
+            wb_rs1data <= mem_rs1data; wb_rs2data <= mem_rs2data;
+            wb_rs1 <= mem_rs1; wb_rs2 <= mem_rs2; wb_rd <= mem_rd;
+            wb_m2r <= mem_m2r; wb_rwrite <= mem_rwrite; wb_jlink <= mem_jlink;
+            wb_trap <= mem_trap; wb_halt <= mem_halt;
+            wb_daddr <= mem_addr; wb_dmask <= mem_mask;
+            wb_dren <= o_dmem_ren; wb_dwen <= o_dmem_wen;
+            wb_drdata <= i_dmem_rdata; wb_dwdata <= mem_wdata;
+        end
+    end
 
-    // MEMORY INTERFACE ********
-
-    wire misaligned_access;
-    alignment_checker u_alignment_checker (
-        .opcode(opcode),
-        .funct3(funct3),
-        .i_addr(alu_result),
-        .misaligned_access(misaligned_access)
-    );
-
-    // mask and aligning for store and load
-    dmem_adapter u_dmem_adapter (
-        .funct3(funct3),
-        .i_addr(alu_result),
-        .i_data(rs2_data),
-        .dmem_mask(o_dmem_mask),
-        .o_addr(o_dmem_addr),
-        .o_data(o_dmem_wdata)
-    );
-
-    // loaded value formatting (sign/zero extend, shift to correct byte)
-    wire [31:0] load_data;
-    load_formatter u_load_formatter (
-        .funct3(funct3),
-        .i_data(i_dmem_rdata),
-        .dmem_mask(o_dmem_mask),
-        .o_data(load_data)
-    );
-
-    assign reg_write_en = decoder_reg_write;
-    assign reg_write_data = (jal || jalr) ? pc_plus4 : (mem_to_reg ? load_data : alu_result);
-    
-    // per instructions: " For project 3, your single cycle processor should assert o_retire_valid every cycle."
-    assign o_retire_valid = 1'b1;
-
-    wire misaligned_nextpc;
-    assign misaligned_nextpc = (next_pc[1:0] != 2'b00);
-
-    assign o_retire_trap = misaligned_access || illegal_instr || misaligned_nextpc; // illegal stuff
-    assign o_retire_halt = (instr == 32'h00100073); // ebreak
-
-    // pipe along rest of the retire values:
-    assign o_retire_inst = instr;
-    assign o_retire_rs1_raddr = rs1;
-    assign o_retire_rs2_raddr = rs2;
-    assign o_retire_rs1_rdata = rs1_data;
-    assign o_retire_rs2_rdata = rs2_data;
-    assign o_retire_rd_waddr = reg_write_en ? rd : 5'b0;
-    assign o_retire_rd_wdata = reg_write_data;
-    assign o_retire_pc = pc;
-    assign o_retire_next_pc = next_pc;
+    // Retire information follows the instruction through to WB.
+    assign o_retire_valid = wb_valid;
+    assign o_retire_inst = wb_inst;
+    assign o_retire_trap = wb_trap;
+    assign o_retire_halt = wb_halt;
+    assign o_retire_rs1_raddr = wb_rs1;
+    assign o_retire_rs2_raddr = wb_rs2;
+    assign o_retire_rs1_rdata = wb_rs1data;
+    assign o_retire_rs2_rdata = wb_rs2data;
+    assign o_retire_rd_waddr = wb_wen ? wb_rd : 5'd0;
+    assign o_retire_rd_wdata = wb_value;
+    assign o_retire_pc = wb_pc;
+    assign o_retire_next_pc = wb_nextpc;
+    assign o_retire_dmem_addr = wb_daddr;
+    assign o_retire_dmem_mask = wb_dmask;
+    assign o_retire_dmem_ren = wb_dren;
+    assign o_retire_dmem_wen = wb_dwen;
+    assign o_retire_dmem_rdata = wb_drdata;
+    assign o_retire_dmem_wdata = wb_dwdata;
 endmodule
-
 `default_nettype wire
