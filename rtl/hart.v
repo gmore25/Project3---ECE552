@@ -159,21 +159,21 @@ module hart #(
     wire [6:0] funct7 = instr[31:25];
 
     // Extracts the immediate value based on the instruction format.
-    wire [5:0] fmt;
+    wire [5:0] format;
     wire [31:0] immediate;
 
-    imm_format u_fmt (.opcode(opcode), .imm_format(fmt));
-    imm u_imm (.i_inst(instr), .i_format(fmt), .o_immediate(immediate));
+    imm_format u_fmt (.opcode(opcode), .imm_format(format));
+    imm u_imm (.i_inst(instr), .i_format(format), .o_immediate(immediate));
 
     // Should decode the control signals needed by later pipeline stages.
     wire dec_branch, dec_jal, dec_jalr, dec_m2r, dec_mread, dec_mwrite;
-    wire dec_asrc, dec_rwrite, dec_uns, dec_sub, dec_arith;
+    wire dec_asrc, dec_rewrite, dec_uns, dec_sub, dec_arith;
     wire [2:0] dec_alu_sel;
     instruction_decoder u_dec (
         .opcode(opcode), .funct3(funct3), .funct7(funct7),
         .branch(dec_branch), .jal(dec_jal), .jalr(dec_jalr),
         .MemToReg(dec_m2r), .MemRead(dec_mread), .MemWrite(dec_mwrite),
-        .alu_src(dec_asrc), .RegWrite(dec_rwrite),
+        .alu_src(dec_asrc), .RegWrite(dec_rewrite),
         .alu_unsigned(dec_uns), .alu_sub(dec_sub), .alu_arith(dec_arith),
         .alu_sel(dec_alu_sel)
     );
@@ -195,7 +195,7 @@ module hart #(
     // This is so that the WB stage stores the final instruction results and retirement information.
     wire [31:0] wb_value;
     wire wb_wen;
-    reg wb_valid, wb_rwrite, wb_m2r, wb_jlink, wb_trap, wb_halt;
+    reg wb_valid, wb_rewrite, wb_m2r, wb_jlink, wb_trap, wb_halt;
     reg [31:0] wb_pc, wb_nextpc, wb_inst, wb_alu, wb_load, wb_pc4;
     reg [31:0] wb_rs1data, wb_rs2data;
     reg [4:0] wb_rs1, wb_rs2, wb_rd;
@@ -207,7 +207,7 @@ module hart #(
     assign wb_value = wb_jlink ? wb_pc4 : (wb_m2r ? wb_load : wb_alu);
 
     // Makes sure that only valid instructions can write to a nonzero register without a trap.
-    assign wb_wen = wb_valid && wb_rwrite && !wb_trap && (wb_rd != 0);
+    assign wb_wen = wb_valid && wb_rewrite && !wb_trap && (wb_rd != 0);
 
     // Reads source registers in ID and write completed results in WB.
     // Bypassing is disabled, so register dependencies are handled using stalls.
@@ -222,7 +222,7 @@ module hart #(
     // ID/EX PIPELINE REGISTERS
     // Hold decoded operands, instruction fields, and controls for EX.
     reg ex_valid, ex_branch, ex_jal, ex_jalr, ex_m2r, ex_mread, ex_mwrite;
-    reg ex_asrc, ex_rwrite, ex_uns, ex_sub, ex_arith, ex_illegal, ex_halt;
+    reg ex_asrc, ex_rewrite, ex_uns, ex_sub, ex_arith, ex_illegal, ex_halt;
     reg [2:0] ex_alu_sel, ex_funct3;
     reg [6:0] ex_opcode;
     reg [4:0] ex_rs1, ex_rs2, ex_rd;
@@ -230,7 +230,7 @@ module hart #(
 
     // EX/MEM PIPELINE REGISTERS
     // Hold execution results and controls needed by MEM and WB.
-    reg mem_valid, mem_m2r, mem_mread, mem_mwrite, mem_rwrite, mem_jlink;
+    reg mem_valid, mem_m2r, mem_mread, mem_mwrite, mem_rewrite, mem_jlink;
     reg mem_trap, mem_halt;
     reg [2:0] mem_funct3;
     reg [4:0] mem_rs1, mem_rs2, mem_rd;
@@ -240,12 +240,12 @@ module hart #(
     // RAW HAZARD DETECTION (STALLING)
     // Stall if the instruction in ID needs a register being written by
     // an instruction currently in EX, MEM, or WB.
-    wire hazard_ex = ex_valid && ex_rwrite && ex_rd != 0 &&
+    wire hazard_ex = ex_valid && ex_rewrite && ex_rd != 0 &&
         ((uses_rs1 && rs1 == ex_rd) || (uses_rs2 && rs2 == ex_rd));
 
     wire hazard_mem = 1'b0;
 
-    wire hazard_wb = wb_valid && wb_rwrite && wb_rd != 0 &&
+    wire hazard_wb = wb_valid && wb_rewrite && wb_rd != 0 &&
         ((uses_rs1 && rs1 == wb_rd) || (uses_rs2 && rs2 == wb_rd));
 
     // Stall IF/ID until all required source register values are available.
@@ -367,7 +367,7 @@ module hart #(
                 ex_m2r <= dec_m2r; ex_mread <= dec_mread; ex_mwrite <= dec_mwrite;
 
                 // ALU and register writeback controls.
-                ex_asrc <= dec_asrc; ex_rwrite <= dec_rwrite;
+                ex_asrc <= dec_asrc; ex_rewrite <= dec_rewrite;
                 ex_uns <= dec_uns; ex_sub <= dec_sub; ex_arith <= dec_arith;
                 ex_alu_sel <= dec_alu_sel;
 
@@ -388,7 +388,7 @@ module hart #(
 
             // Pass memory and writeback controls to MEM.
             mem_m2r <= ex_m2r; mem_mread <= ex_mread; mem_mwrite <= ex_mwrite;
-            mem_rwrite <= ex_rwrite;
+            mem_rewrite <= ex_rewrite;
             mem_jlink <= ex_jal || ex_jalr;
 
             // Carry trap and halt status forward.
@@ -408,7 +408,7 @@ module hart #(
             wb_rs1 <= mem_rs1; wb_rs2 <= mem_rs2; wb_rd <= mem_rd;
 
             // Pass writeback controls.
-            wb_m2r <= mem_m2r; wb_rwrite <= mem_rwrite;
+            wb_m2r <= mem_m2r; wb_rewrite <= mem_rewrite;
             wb_jlink <= mem_jlink;
 
             wb_trap <= mem_trap;

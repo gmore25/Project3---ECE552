@@ -1,0 +1,9 @@
+ChatGPT was initially used for explanation purposes. We did this because we started working before all the pipeline 
+lectures were complete. Thus, we used ChatGPT to provide more context into what this project would be about
+and how it extended from project 3. The exact prompt that was given is listed below:
+
+"Provide an explanation of project 4, what is being asked? What to submit exactly in the end? Break it down. 
+**Copy-pasted project 4 description**"
+
+To make the code and schematic for problem 1 and 2, textbooks, lectures and project 3 files were used as reference. 
+
