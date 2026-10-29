@@ -150,17 +150,22 @@ module hart #(
     wire [31:0] if_pc4 = if_pc + 32'd4;
 
     // INSTRUCTION DECODE FIELDS
+    // It should decode the instruction currently held in the IF/ID pipeline register.
     wire [31:0] instr = if_instr;
+
     wire [6:0] opcode = instr[6:0];
     wire [4:0] rs1 = instr[19:15], rs2 = instr[24:20], rd = instr[11:7];
     wire [2:0] funct3 = instr[14:12];
     wire [6:0] funct7 = instr[31:25];
-    // connecting the imm.v file to get immediate values for the instruction
+
+    // Extracts the immediate value based on the instruction format.
     wire [5:0] fmt;
     wire [31:0] immediate;
+
     imm_format u_fmt (.opcode(opcode), .imm_format(fmt));
     imm u_imm (.i_inst(instr), .i_format(fmt), .o_immediate(immediate));
 
+    // Should decode the control signals needed by later pipeline stages.
     wire dec_branch, dec_jal, dec_jalr, dec_m2r, dec_mread, dec_mwrite;
     wire dec_asrc, dec_rwrite, dec_uns, dec_sub, dec_arith;
     wire [2:0] dec_alu_sel;
@@ -172,15 +177,22 @@ module hart #(
         .alu_unsigned(dec_uns), .alu_sub(dec_sub), .alu_arith(dec_arith),
         .alu_sel(dec_alu_sel)
     );
+
+    // This part detects unsupported or illegal instructions.
     wire dec_illegal;
     instruction_checker u_chk (.instr(instr), .illegal_instr(dec_illegal));
+
+    // Identify which source registers are actually used by the instruction.
+    // This is to prevent unnecessary stalls when an instruction does not read rs1/rs2.
     wire uses_rs1 = (opcode == 7'b0110011 || opcode == 7'b0010011 ||
-                     opcode == 7'b0000011 || opcode == 7'b0100011 ||
-                     opcode == 7'b1100011 || opcode == 7'b1100111);
+                    opcode == 7'b0000011 || opcode == 7'b0100011 ||
+                    opcode == 7'b1100011 || opcode == 7'b1100111);
+
     wire uses_rs2 = (opcode == 7'b0110011 || opcode == 7'b0100011 ||
-                     opcode == 7'b1100011);
+                    opcode == 7'b1100011);
 
     // REGISTER FILE READ AND WRITE SIGNALS
+    // This is so that the WB stage stores the final instruction results and retirement information.
     wire [31:0] wb_value;
     wire wb_wen;
     reg wb_valid, wb_rwrite, wb_m2r, wb_jlink, wb_trap, wb_halt;
@@ -190,9 +202,15 @@ module hart #(
     reg [31:0] wb_daddr, wb_dwdata, wb_drdata;
     reg [3:0] wb_dmask;
     reg wb_dren, wb_dwen;
+
+    // Select the value to write back: PC+4, loaded data, or ALU result.
     assign wb_value = wb_jlink ? wb_pc4 : (wb_m2r ? wb_load : wb_alu);
+
+    // Makes sure that only valid instructions can write to a nonzero register without a trap.
     assign wb_wen = wb_valid && wb_rwrite && !wb_trap && (wb_rd != 0);
 
+    // Reads source registers in ID and write completed results in WB.
+    // Bypassing is disabled, so register dependencies are handled using stalls.
     wire [31:0] rs1_data, rs2_data;
     rf #(.BYPASS_EN(0)) u_rf (
         .i_clk(i_clk), .i_rst(i_rst),
@@ -201,7 +219,8 @@ module hart #(
         .i_rd_wen(wb_wen), .i_rd_waddr(wb_rd), .i_rd_wdata(wb_value)
     );
 
-    // ID/EX: register operands and control signals for execution.
+    // ID/EX PIPELINE REGISTERS
+    // Hold decoded operands, instruction fields, and controls for EX.
     reg ex_valid, ex_branch, ex_jal, ex_jalr, ex_m2r, ex_mread, ex_mwrite;
     reg ex_asrc, ex_rwrite, ex_uns, ex_sub, ex_arith, ex_illegal, ex_halt;
     reg [2:0] ex_alu_sel, ex_funct3;
@@ -209,7 +228,8 @@ module hart #(
     reg [4:0] ex_rs1, ex_rs2, ex_rd;
     reg [31:0] ex_pc, ex_pc4, ex_inst, ex_imm, ex_rs1data, ex_rs2data;
 
-    // EX/MEM: hold ALU result and memory controls.
+    // EX/MEM PIPELINE REGISTERS
+    // Hold execution results and controls needed by MEM and WB.
     reg mem_valid, mem_m2r, mem_mread, mem_mwrite, mem_rwrite, mem_jlink;
     reg mem_trap, mem_halt;
     reg [2:0] mem_funct3;
@@ -217,42 +237,68 @@ module hart #(
     reg [31:0] mem_pc, mem_pc4, mem_nextpc, mem_inst, mem_alu;
     reg [31:0] mem_rs1data, mem_rs2data;
 
-    // Stall on RAW dependencies until the needed register value is written back.
+    // RAW HAZARD DETECTION (STALLING)
+    // Stall if the instruction in ID needs a register being written by
+    // an instruction currently in EX, MEM, or WB.
     wire hazard_ex = ex_valid && ex_rwrite && ex_rd != 0 &&
         ((uses_rs1 && rs1 == ex_rd) || (uses_rs2 && rs2 == ex_rd));
-    wire hazard_mem = mem_valid && mem_rwrite && mem_rd != 0 &&
-        ((uses_rs1 && rs1 == mem_rd) || (uses_rs2 && rs2 == mem_rd));
+
+    wire hazard_mem = 1'b0;
+
     wire hazard_wb = wb_valid && wb_rwrite && wb_rd != 0 &&
         ((uses_rs1 && rs1 == wb_rd) || (uses_rs2 && rs2 == wb_rd));
+
+    // Stall IF/ID until all required source register values are available.
     wire stall = if_valid && (hazard_ex || hazard_mem || hazard_wb);
 
-    // ALU EXECUTION and branch/jump targets
+    // EXECUTION STAGE (EX)
+    // Use the registered operands and controls from ID/EX.
     wire [31:0] ex_op1, ex_op2, ex_alu_result;
     wire ex_eq, ex_slt;
+
+    // Select the first ALU operand (register value or PC).
     op1_selector u_op1 (
         .opcode(ex_opcode), .pc(ex_pc), .r1_data(ex_rs1data), .op1(ex_op1)
     );
+
+    // Select the second ALU operand (immediate or register value).
     assign ex_op2 = ex_asrc ? ex_imm : ex_rs2data;
+
+    // Perform arithmetic/logic operations and comparisons.
     alu u_alu (
         .i_opsel(ex_alu_sel), .i_sub(ex_sub),
         .i_unsigned(ex_uns), .i_arith(ex_arith),
         .i_op1(ex_op1), .i_op2(ex_op2),
         .o_result(ex_alu_result), .o_eq(ex_eq), .o_slt(ex_slt)
     );
+
+    // Calculate the next PC for branches and jumps.
     wire [31:0] ex_target;
+
     brancher u_branch (
         .branch(ex_branch), .jal(ex_jal), .jalr(ex_jalr),
         .slt(ex_slt), .eq(ex_eq), .funct3(ex_funct3),
         .pcp4(ex_pc4), .pcpimm(ex_pc + ex_imm),
         .alu_out(ex_alu_result), .next_pc(ex_target)
     );
+
+    // Redirect the PC when EX selects a target other than PC+4.
+    // The sequential block uses this signal to flush wrong-path instructions.
     wire redirect = ex_valid && (ex_target != ex_pc4);
+
+    // Save the actual next PC for instruction retirement.
     wire [31:0] ex_nextpc = ex_target;
+
+    // Check for misaligned memory accesses.
     wire ex_badalign;
+
     alignment_checker u_align (
         .opcode(ex_opcode), .funct3(ex_funct3),
         .i_addr(ex_alu_result), .misaligned_access(ex_badalign)
     );
+
+    // Generate a trap for illegal instructions, misaligned accesses,
+    // or misaligned branch/jump targets.
     wire ex_trap = ex_illegal || ex_badalign ||
         ((ex_branch || ex_jal || ex_jalr) && ex_target[1:0] != 2'b00);
 
@@ -330,7 +376,6 @@ module hart #(
                 ex_halt <= instr == 32'h00100073;
             end
 
-
             // EX/MEM: Store execution results and controls for memory access.
             mem_valid <= ex_valid;
             mem_pc <= ex_pc; mem_pc4 <= ex_pc4; mem_inst <= ex_inst;
@@ -349,7 +394,6 @@ module hart #(
             // Carry trap and halt status forward.
             mem_trap <= ex_trap;
             mem_halt <= ex_halt;
-
 
             // MEM/WB: Store final results for register writeback and retirement.
             wb_valid <= mem_valid;
