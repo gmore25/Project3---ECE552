@@ -273,8 +273,10 @@ module hart #(
         .dmem_mask(mem_mask), .o_data(mem_load)
     );
 
+    // Sequential logic for the 5-stage pipeline
     always @(posedge i_clk) begin
         if (i_rst) begin
+            // Resets the PC and invalidates all pipeline stages
             pc <= RESET_ADDR;
             if_valid <= 0;
             if_instr <= NOP;
@@ -283,73 +285,122 @@ module hart #(
             mem_valid <= 0;
             wb_valid <= 0;
         end else begin
-            // Redirect flushes wrong-path instructions; otherwise a stall holds IF/ID.
+            // IF/ID: will fetch the next instruction, unless stalled or redirected
             if (redirect) begin
+                // Is taken from the branch/jump: update PC and flush wrong-path instruction.
                 pc <= ex_target;
                 if_valid <= 0;
                 if_instr <= NOP;
+
             end else if (!stall) begin
+                // Normal fetch: advance PC and save fetched instruction.
                 pc <= pc_plus4;
                 if_pc <= pc;
                 if_instr <= i_imem_rdata;
                 if_valid <= 1;
             end
-
-            // ID/EX: register operands and control signals for execution.: insert bubble on RAW stall or redirect.
+            // On stall, PC and IF/ID registers retain their previous values.
+            // ID/EX: Pass decoded instruction and operands into EX.
             if (redirect || stall) begin
+                // Insert a bubble to prevent incorrect execution.
                 ex_valid <= 0;
             end else begin
                 ex_valid <= if_valid;
+
+                // Instruction address and immediate.
                 ex_pc <= if_pc; ex_pc4 <= if_pc4; ex_inst <= instr;
-                ex_imm <= immediate; ex_rs1data <= rs1_data; ex_rs2data <= rs2_data;
+                ex_imm <= immediate;
+
+                // Register operands and instruction fields.
+                ex_rs1data <= rs1_data; ex_rs2data <= rs2_data;
                 ex_rs1 <= rs1; ex_rs2 <= rs2; ex_rd <= rd;
                 ex_funct3 <= funct3; ex_opcode <= opcode;
+
+                // Branch, jump, and memory control signals.
                 ex_branch <= dec_branch; ex_jal <= dec_jal; ex_jalr <= dec_jalr;
                 ex_m2r <= dec_m2r; ex_mread <= dec_mread; ex_mwrite <= dec_mwrite;
+
+                // ALU and register writeback controls.
                 ex_asrc <= dec_asrc; ex_rwrite <= dec_rwrite;
                 ex_uns <= dec_uns; ex_sub <= dec_sub; ex_arith <= dec_arith;
                 ex_alu_sel <= dec_alu_sel;
-                ex_illegal <= dec_illegal; ex_halt <= instr == 32'h00100073;
+
+                // Track illegal instructions and EBREAK.
+                ex_illegal <= dec_illegal;
+                ex_halt <= instr == 32'h00100073;
             end
 
-            // EX/MEM: hold ALU result and memory controls.
+
+            // EX/MEM: Store execution results and controls for memory access.
             mem_valid <= ex_valid;
             mem_pc <= ex_pc; mem_pc4 <= ex_pc4; mem_inst <= ex_inst;
             mem_nextpc <= ex_nextpc; mem_alu <= ex_alu_result;
+
+            // Preserve register values and instruction fields.
             mem_rs1data <= ex_rs1data; mem_rs2data <= ex_rs2data;
             mem_rs1 <= ex_rs1; mem_rs2 <= ex_rs2; mem_rd <= ex_rd;
             mem_funct3 <= ex_funct3;
-            mem_m2r <= ex_m2r; mem_mread <= ex_mread; mem_mwrite <= ex_mwrite;
-            mem_rwrite <= ex_rwrite; mem_jlink <= ex_jal || ex_jalr;
-            mem_trap <= ex_trap; mem_halt <= ex_halt;
 
-            // MEM/WB
+            // Pass memory and writeback controls to MEM.
+            mem_m2r <= ex_m2r; mem_mread <= ex_mread; mem_mwrite <= ex_mwrite;
+            mem_rwrite <= ex_rwrite;
+            mem_jlink <= ex_jal || ex_jalr;
+
+            // Carry trap and halt status forward.
+            mem_trap <= ex_trap;
+            mem_halt <= ex_halt;
+
+
+            // MEM/WB: Store final results for register writeback and retirement.
             wb_valid <= mem_valid;
+
             wb_pc <= mem_pc; wb_pc4 <= mem_pc4; wb_inst <= mem_inst;
-            wb_nextpc <= mem_nextpc; wb_alu <= mem_alu; wb_load <= mem_load;
+            wb_nextpc <= mem_nextpc;
+            wb_alu <= mem_alu;
+            wb_load <= mem_load;
+
+            // Preserve register information for retirement.
             wb_rs1data <= mem_rs1data; wb_rs2data <= mem_rs2data;
             wb_rs1 <= mem_rs1; wb_rs2 <= mem_rs2; wb_rd <= mem_rd;
-            wb_m2r <= mem_m2r; wb_rwrite <= mem_rwrite; wb_jlink <= mem_jlink;
-            wb_trap <= mem_trap; wb_halt <= mem_halt;
-            wb_daddr <= mem_addr; wb_dmask <= mem_mask;
-            wb_dren <= o_dmem_ren; wb_dwen <= o_dmem_wen;
-            wb_drdata <= i_dmem_rdata; wb_dwdata <= mem_wdata;
+
+            // Pass writeback controls.
+            wb_m2r <= mem_m2r; wb_rwrite <= mem_rwrite;
+            wb_jlink <= mem_jlink;
+
+            wb_trap <= mem_trap;
+            wb_halt <= mem_halt;
+
+            // Save memory access information for retirement.
+            wb_daddr <= mem_addr;
+            wb_dmask <= mem_mask;
+            wb_dren <= o_dmem_ren;
+            wb_dwen <= o_dmem_wen;
+            wb_drdata <= i_dmem_rdata;
+            wb_dwdata <= mem_wdata;
         end
     end
 
-    // Retire information follows the instruction through to WB.
+    // Retirement interface: Report completed instructions from WB.
     assign o_retire_valid = wb_valid;
     assign o_retire_inst = wb_inst;
     assign o_retire_trap = wb_trap;
     assign o_retire_halt = wb_halt;
+
+    // Source register information.
     assign o_retire_rs1_raddr = wb_rs1;
     assign o_retire_rs2_raddr = wb_rs2;
     assign o_retire_rs1_rdata = wb_rs1data;
     assign o_retire_rs2_rdata = wb_rs2data;
+
+    // Destination register and final writeback value.
     assign o_retire_rd_waddr = wb_wen ? wb_rd : 5'd0;
     assign o_retire_rd_wdata = wb_value;
+
+    // Instruction PC information.
     assign o_retire_pc = wb_pc;
     assign o_retire_next_pc = wb_nextpc;
+
+    // Memory access information for retired instructions.
     assign o_retire_dmem_addr = wb_daddr;
     assign o_retire_dmem_mask = wb_dmask;
     assign o_retire_dmem_ren = wb_dren;
