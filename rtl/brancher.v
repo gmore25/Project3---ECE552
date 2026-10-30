@@ -1,8 +1,7 @@
 `default_nettype none
 
-// main branch (combinational) logic processing block: 
-// only one of branch, jal, jalr can be true at a time
-// slight departure from schematic: eliminates the intermediate pc_sel and directly muxes
+// Combinational branch/jump control. 
+// Only one of branch, jal, jalr can be true at a time.
 module brancher (
     input  wire branch,
     input  wire jal,
@@ -10,21 +9,21 @@ module brancher (
     input  wire slt,
     input  wire eq,
     input  wire [2:0] funct3,
-    input  wire [31:0] pcp4,
-    input  wire [31:0] pcpimm,
-    input  wire [31:0] alu_out,
-    output wire [31:0] next_pc
+    output wire is_hop,         // hop to specified value rather than step to +4
+    output wire is_jalr_target  // choose between new PC value used for JALR or B/J
 );
     // note signed and unsigned logic is the same here: 
     // that nuance should be handled in the ALU
-    assign next_pc = 
-        jalr ? {alu_out[31:1], 1'b0} : // jalr target is ALU output, but LSB is always 0
-        jal  ? pcpimm :
-        (branch && funct3 == 3'b000 && eq)   ? pcpimm : // beq
-        (branch && funct3 == 3'b001 && !eq)  ? pcpimm : // bne
-        (branch && funct3 == 3'b100 && slt)  ? pcpimm : // blt (these can probably be simplified as funct3[2] == 1'b1)
-        (branch && funct3 == 3'b101 && !slt) ? pcpimm : // bge  |
-        (branch && funct3 == 3'b110 && slt)  ? pcpimm : // bltu |
-        (branch && funct3 == 3'b111 && !slt) ? pcpimm : // bgeu |
-        pcp4 ;
+    wire branch_condition =
+        (funct3 == 3'b000 && eq)   || // BEQ
+        (funct3 == 3'b001 && !eq)  || // BNE
+        (funct3 == 3'b100 && slt)  || // BLT
+        (funct3 == 3'b101 && !slt) || // BGE
+        (funct3 == 3'b110 && slt)  || // BLTU
+        (funct3 == 3'b111 && !slt);   // BGEU
+
+    assign is_hop = jal || jalr || (branch && branch_condition);
+    assign is_jalr_target = jalr;
 endmodule
+
+`default_nettype wire

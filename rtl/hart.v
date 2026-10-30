@@ -182,15 +182,6 @@ module hart #(
     wire dec_illegal;
     instruction_checker u_chk (.instr(instr), .illegal_instr(dec_illegal));
 
-    // Identify which source registers are actually used by the instruction.
-    // This is to prevent unnecessary stalls when an instruction does not read rs1/rs2.
-    wire uses_rs1 = (opcode == 7'b0110011 || opcode == 7'b0010011 ||
-                    opcode == 7'b0000011 || opcode == 7'b0100011 ||
-                    opcode == 7'b1100011 || opcode == 7'b1100111);
-
-    wire uses_rs2 = (opcode == 7'b0110011 || opcode == 7'b0100011 ||
-                    opcode == 7'b1100011);
-
     // REGISTER FILE READ AND WRITE SIGNALS
     // This is so that the WB stage stores the final instruction results and retirement information.
     wire [31:0] wb_value;
@@ -237,19 +228,17 @@ module hart #(
     reg [31:0] mem_pc, mem_pc4, mem_nextpc, mem_inst, mem_alu;
     reg [31:0] mem_rs1data, mem_rs2data;
 
-    // RAW HAZARD DETECTION (STALLING)
-    // Stall if the instruction in ID needs a register being written by
-    // an instruction currently in EX, MEM, or WB.
-    wire hazard_ex = ex_valid && ex_rewrite && ex_rd != 0 &&
-        ((uses_rs1 && rs1 == ex_rd) || (uses_rs2 && rs2 == ex_rd));
-
-    wire hazard_mem = 1'b0;
-
-    wire hazard_wb = wb_valid && wb_rewrite && wb_rd != 0 &&
-        ((uses_rs1 && rs1 == wb_rd) || (uses_rs2 && rs2 == wb_rd));
-
-    // Stall IF/ID until all required source register values are available.
-    wire stall = if_valid && (hazard_ex || hazard_mem || hazard_wb);
+    // RAW HAZARD DETECTION 
+    // Stall if ID has read context reg which will be written in pipeline
+    wire stall;
+    hazard_detector u_hazard (
+        .if_valid(if_valid), 
+        .opcode(opcode), .rs1(rs1), .rs2(rs2),
+        .ex_valid(ex_valid), .ex_rewrite(ex_rewrite), .ex_rd(ex_rd),
+        .mem_valid(mem_valid), .mem_rewrite(mem_rewrite), .mem_rd(mem_rd),
+        .wb_valid(wb_valid), .wb_rewrite(wb_rewrite), .wb_rd(wb_rd),
+        .stall(stall)
+    );
 
     // EXECUTION STAGE (EX)
     // Use the registered operands and controls from ID/EX.
@@ -272,22 +261,25 @@ module hart #(
         .o_result(ex_alu_result), .o_eq(ex_eq), .o_slt(ex_slt)
     );
 
-    // Calculate the next PC for branches and jumps.
-    wire [31:0] ex_target;
+    // Branch control selects whether to hop and which target to use.
+    wire is_hop, is_jalr_target;
 
     brancher u_branch (
         .branch(ex_branch), .jal(ex_jal), .jalr(ex_jalr),
         .slt(ex_slt), .eq(ex_eq), .funct3(ex_funct3),
-        .pcp4(ex_pc4), .pcpimm(ex_pc + ex_imm),
-        .alu_out(ex_alu_result), .next_pc(ex_target)
+        .is_hop(is_hop), .is_jalr_target(is_jalr_target)
     );
 
-    // Redirect the PC when EX selects a target other than PC+4.
-    // The sequential block uses this signal to flush wrong-path instructions.
-    wire redirect = ex_valid && (ex_target != ex_pc4);
+    // hop target choice between JALR's reg and B/J's pc+imm
+    wire [31:0] hop_pc = is_jalr_target
+        ? {ex_alu_result[31:1], 1'b0}
+        : ex_pc + ex_imm;
 
-    // Save the actual next PC for instruction retirement.
-    wire [31:0] ex_nextpc = ex_target;
+    // Avoid flushing when a valid hop targets the sequential instruction.
+    wire redirect = ex_valid && is_hop && (hop_pc != ex_pc4);
+
+    // pass thru next pc choice to MEM (for bookkeeping it should be stored PC+4 not new one).
+    wire [31:0] ex_nextpc = is_hop ? hop_pc : ex_pc4;
 
     // Check for misaligned memory accesses.
     wire ex_badalign;
@@ -300,7 +292,7 @@ module hart #(
     // Generate a trap for illegal instructions, misaligned accesses,
     // or misaligned branch/jump targets.
     wire ex_trap = ex_illegal || ex_badalign ||
-        ((ex_branch || ex_jal || ex_jalr) && ex_target[1:0] != 2'b00);
+        ((ex_branch || ex_jal || ex_jalr) && ex_nextpc[1:0] != 2'b00);
 
     // MEMORY INTERFACE: only valid instructions may read or write memory.
     wire [31:0] mem_addr, mem_wdata, mem_load;
@@ -334,7 +326,7 @@ module hart #(
             // IF/ID: will fetch the next instruction, unless stalled or redirected
             if (redirect) begin
                 // Is taken from the branch/jump: update PC and flush wrong-path instruction.
-                pc <= ex_target;
+                pc <= hop_pc;
                 if_valid <= 0;
                 if_instr <= NOP;
 
@@ -354,21 +346,34 @@ module hart #(
                 ex_valid <= if_valid;
 
                 // Instruction address and immediate.
-                ex_pc <= if_pc; ex_pc4 <= if_pc4; ex_inst <= instr;
+                ex_pc <= if_pc;
+                ex_pc4 <= if_pc4;
+                ex_inst <= instr;
                 ex_imm <= immediate;
 
                 // Register operands and instruction fields.
-                ex_rs1data <= rs1_data; ex_rs2data <= rs2_data;
-                ex_rs1 <= rs1; ex_rs2 <= rs2; ex_rd <= rd;
-                ex_funct3 <= funct3; ex_opcode <= opcode;
+                ex_rs1data <= rs1_data;
+                ex_rs2data <= rs2_data;
+                ex_rs1 <= rs1;
+                ex_rs2 <= rs2;
+                ex_rd <= rd;
+                ex_funct3 <= funct3;
+                ex_opcode <= opcode;
 
                 // Branch, jump, and memory control signals.
-                ex_branch <= dec_branch; ex_jal <= dec_jal; ex_jalr <= dec_jalr;
-                ex_m2r <= dec_m2r; ex_mread <= dec_mread; ex_mwrite <= dec_mwrite;
+                ex_branch <= dec_branch;
+                ex_jal <= dec_jal;
+                ex_jalr <= dec_jalr;
+                ex_m2r <= dec_m2r;
+                ex_mread <= dec_mread; 
+                ex_mwrite <= dec_mwrite;
 
                 // ALU and register writeback controls.
-                ex_asrc <= dec_asrc; ex_rewrite <= dec_rewrite;
-                ex_uns <= dec_uns; ex_sub <= dec_sub; ex_arith <= dec_arith;
+                ex_asrc <= dec_asrc;
+                ex_rewrite <= dec_rewrite;
+                ex_uns <= dec_uns;
+                ex_sub <= dec_sub;
+                ex_arith <= dec_arith;
                 ex_alu_sel <= dec_alu_sel;
 
                 // Track illegal instructions and EBREAK.
@@ -378,16 +383,24 @@ module hart #(
 
             // EX/MEM: Store execution results and controls for memory access.
             mem_valid <= ex_valid;
-            mem_pc <= ex_pc; mem_pc4 <= ex_pc4; mem_inst <= ex_inst;
-            mem_nextpc <= ex_nextpc; mem_alu <= ex_alu_result;
+            mem_pc <= ex_pc; 
+            mem_pc4 <= ex_pc4;
+            mem_inst <= ex_inst;
+            mem_nextpc <= ex_nextpc;
+            mem_alu <= ex_alu_result;
 
             // Preserve register values and instruction fields.
-            mem_rs1data <= ex_rs1data; mem_rs2data <= ex_rs2data;
-            mem_rs1 <= ex_rs1; mem_rs2 <= ex_rs2; mem_rd <= ex_rd;
+            mem_rs1data <= ex_rs1data;
+            mem_rs2data <= ex_rs2data;
+            mem_rs1 <= ex_rs1;
+            mem_rs2 <= ex_rs2;
+            mem_rd <= ex_rd;
             mem_funct3 <= ex_funct3;
 
             // Pass memory and writeback controls to MEM.
-            mem_m2r <= ex_m2r; mem_mread <= ex_mread; mem_mwrite <= ex_mwrite;
+            mem_m2r <= ex_m2r;
+            mem_mread <= ex_mread;
+            mem_mwrite <= ex_mwrite;
             mem_rewrite <= ex_rewrite;
             mem_jlink <= ex_jal || ex_jalr;
 
@@ -397,20 +410,24 @@ module hart #(
 
             // MEM/WB: Store final results for register writeback and retirement.
             wb_valid <= mem_valid;
-
-            wb_pc <= mem_pc; wb_pc4 <= mem_pc4; wb_inst <= mem_inst;
+            wb_pc <= mem_pc;
+            wb_pc4 <= mem_pc4;
+            wb_inst <= mem_inst;
             wb_nextpc <= mem_nextpc;
             wb_alu <= mem_alu;
             wb_load <= mem_load;
 
             // Preserve register information for retirement.
-            wb_rs1data <= mem_rs1data; wb_rs2data <= mem_rs2data;
-            wb_rs1 <= mem_rs1; wb_rs2 <= mem_rs2; wb_rd <= mem_rd;
+            wb_rs1data <= mem_rs1data;
+            wb_rs2data <= mem_rs2data;
+            wb_rs1 <= mem_rs1;
+            wb_rs2 <= mem_rs2;
+            wb_rd <= mem_rd;
 
             // Pass writeback controls.
-            wb_m2r <= mem_m2r; wb_rewrite <= mem_rewrite;
+            wb_m2r <= mem_m2r;
+            wb_rewrite <= mem_rewrite;
             wb_jlink <= mem_jlink;
-
             wb_trap <= mem_trap;
             wb_halt <= mem_halt;
 
