@@ -323,6 +323,7 @@ module hart #(
             mem_valid <= 0;
             wb_valid <= 0;
         end else begin
+            // big ol blob of wiring and passthroughs
             // IF/ID: will fetch the next instruction, unless stalled or redirected
             if (redirect) begin
                 // Is taken from the branch/jump: update PC and flush wrong-path instruction.
@@ -343,6 +344,7 @@ module hart #(
                 // Insert a bubble to prevent incorrect execution.
                 ex_valid <= 0;
             end else begin
+                // advance to decoded instruction
                 ex_valid <= if_valid;
 
                 // Instruction address and immediate.
@@ -441,27 +443,19 @@ module hart #(
         end
     end
 
-    // Retirement interface: Report completed instructions from WB.
+    // retirement handling (take verbatim from WB; no write addr if not w_en)
     assign o_retire_valid = wb_valid;
     assign o_retire_inst = wb_inst;
     assign o_retire_trap = wb_trap;
     assign o_retire_halt = wb_halt;
-
-    // Source register information.
     assign o_retire_rs1_raddr = wb_rs1;
     assign o_retire_rs2_raddr = wb_rs2;
     assign o_retire_rs1_rdata = wb_rs1data;
     assign o_retire_rs2_rdata = wb_rs2data;
-
-    // Destination register and final writeback value.
     assign o_retire_rd_waddr = wb_wen ? wb_rd : 5'd0;
     assign o_retire_rd_wdata = wb_value;
-
-    // Instruction PC information.
     assign o_retire_pc = wb_pc;
     assign o_retire_next_pc = wb_nextpc;
-
-    // Memory access information for retired instructions.
     assign o_retire_dmem_addr = wb_daddr;
     assign o_retire_dmem_mask = wb_dmask;
     assign o_retire_dmem_ren = wb_dren;
