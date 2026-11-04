@@ -228,17 +228,61 @@ module hart #(
     reg [31:0] mem_pc, mem_pc4, mem_nextpc, mem_inst, mem_alu;
     reg [31:0] mem_rs1data, mem_rs2data;
 
-    // RAW HAZARD DETECTION 
-    // Stall if ID has read context reg which will be written in pipeline
+    /// RAW hazard detection with forwarding support.
     wire stall;
     hazard_detector u_hazard (
-        .if_valid(if_valid), 
-        .opcode(opcode), .rs1(rs1), .rs2(rs2),
-        .ex_valid(ex_valid), .ex_rewrite(ex_rewrite), .ex_rd(ex_rd),
-        .mem_valid(mem_valid), .mem_rewrite(mem_rewrite), .mem_rd(mem_rd),
-        .wb_valid(wb_valid), .wb_rewrite(wb_rewrite), .wb_rd(wb_rd),
+        .if_valid(if_valid),
+        .opcode(opcode),
+        .rs1(rs1),
+        .rs2(rs2),
+        .ex_valid(ex_valid),
+        .ex_rewrite(ex_rewrite),
+        .ex_rd(ex_rd),
+        .ex_mread(ex_mread),
+        .wb_valid(wb_valid),
+        .wb_rewrite(wb_rewrite),
+        .wb_rd(wb_rd),
         .stall(stall)
     );
+
+    // FORWARDING LOGIC
+    // EX/MEM has priority over MEM/WB because it holds the newer result.
+    wire forward_rs1_mem;
+    wire forward_rs2_mem;
+    wire forward_rs1_wb;
+    wire forward_rs2_wb;
+    wire [31:0] mem_forward_value;
+    wire [31:0] ex_rs1_forwarded;
+    wire [31:0] ex_rs2_forwarded;
+
+    // ALU results are available in EX/MEM.
+    // JAL and JALR write PC+4 instead of the ALU result.
+    // Loads cannot use this path because their data comes from memory.
+    assign mem_forward_value = mem_jlink ? mem_pc4 : mem_alu;
+    assign forward_rs1_mem =
+        mem_valid && mem_rewrite && !mem_trap &&
+        !mem_mread && (mem_rd != 5'd0) &&
+        (ex_rs1 == mem_rd);
+    assign forward_rs2_mem =
+        mem_valid && mem_rewrite && !mem_trap &&
+        !mem_mread && (mem_rd != 5'd0) &&
+        (ex_rs2 == mem_rd);
+
+    // MEM/WB forwarding is used only when EX/MEM has no match.
+    assign forward_rs1_wb =
+        wb_wen && (ex_rs1 == wb_rd) && !forward_rs1_mem;
+    assign forward_rs2_wb =
+        wb_wen && (ex_rs2 == wb_rd) && !forward_rs2_mem;
+
+    // Choose the newest available operand value.
+    assign ex_rs1_forwarded =
+        forward_rs1_mem ? mem_forward_value :
+        forward_rs1_wb  ? wb_value :
+                        ex_rs1data;
+    assign ex_rs2_forwarded =
+        forward_rs2_mem ? mem_forward_value :
+        forward_rs2_wb  ? wb_value :
+                        ex_rs2data;
 
     // EXECUTION STAGE (EX)
     // Use the registered operands and controls from ID/EX.
@@ -246,9 +290,14 @@ module hart #(
     wire ex_eq, ex_slt;
 
     // Select the first ALU operand (register value or PC).
+    // Use forwarded register operands when available.
     op1_selector u_op1 (
-        .opcode(ex_opcode), .pc(ex_pc), .r1_data(ex_rs1data), .op1(ex_op1)
+        .opcode(ex_opcode),
+        .pc(ex_pc),
+        .r1_data(ex_rs1_forwarded),
+        .op1(ex_op1)
     );
+    assign ex_op2 = ex_asrc ? ex_imm : ex_rs2_forwarded;
 
     // Select the second ALU operand (immediate or register value).
     assign ex_op2 = ex_asrc ? ex_imm : ex_rs2data;
@@ -354,8 +403,9 @@ module hart #(
                 ex_imm <= immediate;
 
                 // Register operands and instruction fields.
-                ex_rs1data <= rs1_data;
-                ex_rs2data <= rs2_data;
+                // Write-through for a simultaneous WB write and ID read.
+                ex_rs1data <= (wb_wen && (rs1 == wb_rd)) ? wb_value : rs1_data;
+                ex_rs2data <= (wb_wen && (rs2 == wb_rd)) ? wb_value : rs2_data;
                 ex_rs1 <= rs1;
                 ex_rs2 <= rs2;
                 ex_rd <= rd;
@@ -393,7 +443,8 @@ module hart #(
 
             // Preserve register values and instruction fields.
             mem_rs1data <= ex_rs1data;
-            mem_rs2data <= ex_rs2data;
+            // Preserve forwarded store data for the MEM stage.
+            mem_rs2data <= ex_rs2_forwarded;
             mem_rs1 <= ex_rs1;
             mem_rs2 <= ex_rs2;
             mem_rd <= ex_rd;

@@ -18,6 +18,8 @@ module hazard_detector (
     input wire       wb_valid,
     input wire       wb_rewrite,
     input wire [4:0] wb_rd,
+    input wire ex_mread,
+    input wire mem_mread,
     output wire      stall
 );
     // consider whether rs1/2 are used in read context 
@@ -44,7 +46,12 @@ module hazard_detector (
     wire hazard_wb = wb_valid && wb_rewrite && wb_rd != 0 &&
         ((uses_rs1 && rs1 == wb_rd) || (uses_rs2 && rs2 == wb_rd));
 
-    assign stall = if_valid && (hazard_ex || hazard_mem || hazard_wb);
+    // A load in EX cannot forward its data to the next EX instruction.
+    wire load_use_hazard = hazard_ex && ex_mread;
+
+    // Forwarding resolves ALU dependencies.
+    // A load-use dependency still needs one bubble.
+    assign stall = if_valid && load_use_hazard;
 endmodule
 
 `default_nettype wire
