@@ -19,7 +19,7 @@ module hazard_detector (
     // input wire       wb_rewrite,
     // input wire [4:0] wb_rd,
     input wire       ex_mread,
-    input wire       mem_mread,
+    // input wire       mem_mread,
     output wire      stall
 );
     // consider whether rs1/2 are used in read context

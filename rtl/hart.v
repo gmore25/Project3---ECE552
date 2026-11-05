@@ -430,7 +430,7 @@ module hart #(
             mem_alu <= ex_alu_result;
 
             // Preserve register values and instruction fields.
-            mem_rs1data <= ex_rs1data;
+            mem_rs1data <= ex_rs1_forwarded;
             // Preserve forwarded store data for the MEM stage.
             mem_rs2data <= ex_rs2_forwarded;
             mem_rs1 <= ex_rs1;
