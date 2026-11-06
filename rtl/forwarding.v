@@ -23,8 +23,8 @@ module forwarding (
     output wire [31:0] rs1_out,
     output wire [31:0] rs2_out
 );
-    // TODO: see if the !mem_mread is actually not needed
-    wire mem_wb = mem_valid && !mem_trap && mem_rewrite && (mem_rd != 5'd0);
+    // TODO: have signal consolidation into a mem_wb signal that's reused in wb?
+    wire mem_wen = mem_valid && !mem_trap && mem_rewrite && (mem_rd != 5'd0);
     wire forward_rs1_mem;
     wire forward_rs2_mem;
     wire forward_rs1_wb;
@@ -34,8 +34,8 @@ module forwarding (
 
     // EX->EX forwarding (old ex result now in mem)
     // wb check alone should suffice: hazard check stalls a load instr after reg ALU op instr
-    assign forward_rs1_mem = mem_wb && (ex_rs1 == mem_rd);
-    assign forward_rs2_mem = mem_wb && (ex_rs2 == mem_rd);
+    assign forward_rs1_mem = mem_wen && (ex_rs1 == mem_rd);
+    assign forward_rs2_mem = mem_wen && (ex_rs2 == mem_rd);
 
     // MEM->EX forwarding (old mem in WB): used only when EX/MEM has no match.
     assign forward_rs1_wb = wb_wen && (ex_rs1 == wb_rd);

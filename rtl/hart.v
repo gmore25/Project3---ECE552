@@ -239,9 +239,6 @@ module hart #(
         .ex_rewrite(ex_rewrite),
         .ex_rd(ex_rd),
         .ex_mread(ex_mread),
-        // .wb_valid(wb_valid),
-        // .wb_rewrite(wb_rewrite),
-        // .wb_rd(wb_rd),
         .stall(stall)
     );
 
