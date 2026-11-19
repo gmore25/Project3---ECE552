@@ -17,6 +17,9 @@ module hart #(
     // 32-bit read address for the instruction memory. This is expected to be
     // 4 byte aligned - that is, the two LSBs should be zero.
     output wire [31:0] o_imem_raddr,
+    input wire i_imem_ready,
+    output wire o_imem_ren,
+    input wire i_imem_valid,
     // Instruction word fetched from memory, available on the same cycle.
     input  wire [31:0] i_imem_rdata,
     // Data memory accesses go through a separate read/write data memory (dmem)
@@ -72,6 +75,8 @@ module hart #(
     // address, for the bytes enabled by the mask. When read enable is not
     // asserted, or for bytes not set in the mask, the value is undefined.
     input  wire [31:0] i_dmem_rdata,
+    input wire i_dmem_ready,
+    input wire i_dmem_valid,
 	// The output `retire` interface is used to signal to the testbench that
     // the CPU has completed and retired an instruction. A single cycle
     // implementation will assert this every cycle; however, a pipelined
@@ -142,6 +147,12 @@ module hart #(
     reg [31:0] pc;
     wire [31:0] pc_plus4 = pc + 32'd4;
     assign o_imem_raddr = pc;
+    reg fetch_pending;
+    // Conservative one-instruction-at-a-time pipeline. No outstanding
+    // instruction request can be invalidated by a branch redirect.
+    wire pipeline_empty;
+    assign o_imem_ren = !i_rst && !fetch_pending && pipeline_empty && i_imem_ready;
+    wire fetch_response = fetch_pending && i_imem_valid;
 
     // PC & INSTRUCTION FETCH
     // IF/ID holds the fetched instruction until the next stage can accept it.
@@ -227,6 +238,8 @@ module hart #(
     reg [4:0] mem_rs1, mem_rs2, mem_rd;
     reg [31:0] mem_pc, mem_pc4, mem_nextpc, mem_inst, mem_alu;
     reg [31:0] mem_rs1data, mem_rs2data;
+
+    assign pipeline_empty = !if_valid && !ex_valid && !mem_valid && !wb_valid;
 
     /// RAW hazard detection with forwarding support.
     wire stall;
@@ -338,49 +351,57 @@ module hart #(
     assign o_dmem_addr = mem_addr;
     assign o_dmem_mask = mem_mask;
     assign o_dmem_wdata = mem_wdata;
-    assign o_dmem_ren = mem_valid && mem_mread && !mem_trap;
-    assign o_dmem_wen = mem_valid && mem_mwrite && !mem_trap;
+    // Memory protocol: 0=request, 1=wait for load / issue store fence,
+    // 2=wait for fence read. The fence read ensures a previous store has
+    // actually committed before we retire it (writes have no valid response).
+    reg [1:0] mem_phase;
+    reg [31:0] mem_read_word;
+    wire mem_access = mem_valid && !mem_trap && (mem_mread || mem_mwrite);
+    wire mem_request = mem_access && (mem_phase == 0) && i_dmem_ready;
+    wire fence_request = mem_access && mem_mwrite &&
+                         (mem_phase == 1) && i_dmem_ready;
+    assign o_dmem_ren = (mem_request && mem_mread) || fence_request;
+    assign o_dmem_wen = mem_request && mem_mwrite;
+    wire mem_done = mem_valid && (!mem_access ||
+                    ((mem_mread && mem_phase == 1 && i_dmem_valid) ||
+                     (mem_mwrite && mem_phase == 2 && i_dmem_valid)));
+    wire [31:0] completed_read_word = (mem_mread && i_dmem_valid)
+                                      ? i_dmem_rdata : mem_read_word;
     load_formatter u_load (
-        .funct3(mem_funct3), .i_data(i_dmem_rdata),
+        .funct3(mem_funct3), .i_data(completed_read_word),
         .dmem_mask(mem_mask), .o_data(mem_load)
     );
 
-    // Sequential logic for the 5-stage pipeline
+    // Serialized pipeline controller: each instruction moves through IF,
+    // EX, MEM and WB; memory operations hold MEM until completion.
     always @(posedge i_clk) begin
         if (i_rst) begin
-            // Resets the PC and invalidates all pipeline stages
             pc <= RESET_ADDR;
-            if_valid <= 0;
+            fetch_pending <= 1'b0;
+            if_valid <= 1'b0;
             if_instr <= NOP;
-            if_pc <= 0;
-            ex_valid <= 0;
-            mem_valid <= 0;
-            wb_valid <= 0;
+            if_pc <= 32'd0;
+            ex_valid <= 1'b0;
+            mem_valid <= 1'b0;
+            wb_valid <= 1'b0;
+            mem_phase <= 2'd0;
+            mem_read_word <= 32'd0;
         end else begin
-            // big ol blob of wiring and passthroughs
-            // IF/ID: will fetch the next instruction, unless stalled or redirected
-            if (redirect) begin
-                // Is taken from the branch/jump: update PC and flush wrong-path instruction.
-                pc <= hop_pc;
-                if_valid <= 0;
-                if_instr <= NOP;
+            wb_valid <= 1'b0; // retirement is a one-cycle pulse
 
-            end else if (!stall) begin
-                // Normal fetch: advance PC and save fetched instruction.
-                pc <= pc_plus4;
+            if (o_imem_ren)
+                fetch_pending <= 1'b1;
+            if (fetch_response) begin
+                fetch_pending <= 1'b0;
+                if_valid <= 1'b1;
                 if_pc <= pc;
                 if_instr <= i_imem_rdata;
-                if_valid <= 1;
+                pc <= pc_plus4;
             end
-            // On stall, PC and IF/ID registers retain their previous values.
-            // ID/EX: Pass decoded instruction and operands into EX.
-            if (redirect || stall) begin
-                // Insert a bubble to prevent incorrect execution.
-                ex_valid <= 0;
-            end else begin
-                // advance to decoded instruction
-                ex_valid <= if_valid;
 
+            if (if_valid) begin
+                if_valid <= 1'b0;
+                ex_valid <= 1'b1;
                 // Instruction address and immediate.
                 ex_pc <= if_pc;
                 ex_pc4 <= if_pc4;
@@ -418,8 +439,12 @@ module hart #(
                 ex_halt <= instr == 32'h00100073;
             end
 
-            // EX/MEM: Store execution results and controls for memory access.
-            mem_valid <= ex_valid;
+            if (ex_valid) begin
+                ex_valid <= 1'b0;
+                mem_valid <= 1'b1;
+                mem_phase <= 2'd0;
+                if (redirect)
+                    pc <= hop_pc;
             mem_pc <= ex_pc; 
             mem_pc4 <= ex_pc4;
             mem_inst <= ex_inst;
@@ -446,8 +471,19 @@ module hart #(
             mem_trap <= ex_trap;
             mem_halt <= ex_halt;
 
-            // MEM/WB: Store final results for register writeback and retirement.
-            wb_valid <= mem_valid;
+            end
+
+            if (mem_valid) begin
+                if (mem_request) begin
+                    mem_phase <= 2'd1;
+                end else if (fence_request) begin
+                    mem_phase <= 2'd2;
+                end
+                if (mem_mread && mem_phase == 1 && i_dmem_valid)
+                    mem_read_word <= i_dmem_rdata;
+                if (mem_done) begin
+                    mem_valid <= 1'b0;
+                    wb_valid <= 1'b1;
             wb_pc <= mem_pc;
             wb_pc4 <= mem_pc4;
             wb_inst <= mem_inst;
@@ -472,10 +508,12 @@ module hart #(
             // Save memory access information for retirement.
             wb_daddr <= mem_addr;
             wb_dmask <= mem_mask;
-            wb_dren <= o_dmem_ren;
-            wb_dwen <= o_dmem_wen;
-            wb_drdata <= i_dmem_rdata;
+            wb_dren <= mem_mread && !mem_trap;
+            wb_dwen <= mem_mwrite && !mem_trap;
+            wb_drdata <= mem_mread ? completed_read_word : 32'd0;
             wb_dwdata <= mem_wdata;
+                end
+            end
         end
     end
 
