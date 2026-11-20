@@ -100,7 +100,6 @@ module hart #(
     input  wire [31:0] i_dmem_rdata,
     input wire i_dmem_ready,
     input wire i_dmem_valid,
-	// The output `retire` interface is used to signal to the testbench that
     // The output `retire` interface is used to signal to the testbench that
     // the CPU has completed and retired an instruction. A single cycle
     // implementation will assert this every cycle; however, a pipelined

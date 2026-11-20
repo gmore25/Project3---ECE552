@@ -95,7 +95,28 @@ module cache (
     reg [1:0] valid [DEPTH - 1:0];
     reg       lru   [DEPTH - 1:0];
 
-    // Fill in your implementation here.
+    // tag, set, word breakdown:
+    // TTT..(23)..TTTTSSSSSWW__
+    wire [S-1:0] set_num;
+    wire [T-1:0] tag_num;
+    wire [O-3:0] wrd_num;
+    assign wrd_num = i_req_addr[O-1:2];
+    assign set_num = i_req_addr[O+S-1:O];
+    assign tag_num = i_req_addr[31:O+S];
+
+    // valid and tags match => Hit.
+    wire hit_0, hit_1, miss;
+    assign hit_0 = valid[set_num][0] && (tags0[set_num] == tag_num);
+    assign hit_1 = valid[set_num][1] && (tags1[set_num] == tag_num);
+    assign miss  = !hit_0 && !hit_1;
+
+    always @(posedge i_clk) begin
+        if (i_rst) begin
+            // invalidate and reset LRU
+        end else begin
+            // normal operation
+        end
+    end
 endmodule
 
 `default_nettype wire
