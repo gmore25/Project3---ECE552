@@ -106,13 +106,21 @@ module cache (
 
     // valid and tags match => Hit.
     wire hit_0, hit_1, miss;
+    wire [31:0] cached_word;
     assign hit_0 = valid[set_num][0] && (tags0[set_num] == tag_num);
     assign hit_1 = valid[set_num][1] && (tags1[set_num] == tag_num);
     assign miss  = !hit_0 && !hit_1;
+    assign cached_word = hit_1 ? datas1[set_num][wrd_num]
+                               : datas0[set_num][wrd_num];
 
+    integer reset_set;
     always @(posedge i_clk) begin
         if (i_rst) begin
             // invalidate and reset LRU
+            for (reset_set = 0; reset_set < DEPTH; reset_set = reset_set + 1) begin
+                valid[reset_set] <= 2'b00;
+                lru[reset_set]   <= 1'b0;
+            end
         end else begin
             // normal operation
         end
