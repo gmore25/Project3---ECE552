@@ -1,2 +1,2 @@
-No AI was used for project 5. To make the schematic and code for problem 1 and 2, textbooks, lectures and project 3 and 4 files were used as reference. 
+No AI was used for project 6. To make the code and FSM for problem 1 and 2, textbooks, lectures and project 4 and 5 files were used as reference. 
 
