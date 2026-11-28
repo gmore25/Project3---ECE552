@@ -72,160 +72,172 @@ module cache (
     // same values are used (and consistent with the project specification).
     //
     // 32 sets * 2 ways per set * 16 bytes per way = 1K cache
-    localparam O = 4;            // 4 bit offset => 16 byte cache line
-    localparam S = 5;            // 5 bit set index => 32 sets
-    // ** and / are course-rules-banned (real hardware power/divide
-    // operators synthesize poorly); O and S are fixed per the note above,
-    // so these are equivalent shift-based constant expressions, not a
-    // behavior change.
-    localparam DEPTH = 1 << S;   // 32 sets
-    localparam W = 2;            // 2 way set associative, NMRU
-    localparam T = 32 - O - S;   // 23 bit tag
-    localparam D = (1 << O) >> 2; // 16 bytes per line / 4 bytes per word = 4 words per line
-
+    // ** and / are course-rules-banned; use shift-based constant expressions.
+    localparam O = 4;             // 4 bit offset => 16 byte cache line
+    localparam S = 5;             // 5 bit set index => 32 sets
+    localparam DEPTH = 1 << S;    // 32 sets
+    localparam W = 2;             // 2 way set associative, NMRU
+    localparam T = 32 - O - S;    // 23 bit tag
+    localparam D = (1 << O) >> 2; // 4 words per line
+    localparam IDLE=3'd0, REFILL_REQ=3'd1, REFILL_WAIT=3'd2,
+               WRITE_UPDATE=3'd3, STORE_REQ=3'd4, COMPLETE=3'd5;
+    reg [2:0] state;
     // The following memory arrays model the cache structure. As this is
     // an internal implementation detail, you are *free* to modify these
     // arrays as you please.
-
     // Backing memory, modeled as two separate ways.
-    reg [   31:0] datas0 [DEPTH - 1:0][D - 1:0];
-    reg [   31:0] datas1 [DEPTH - 1:0][D - 1:0];
-    reg [T - 1:0] tags0  [DEPTH - 1:0];
-    reg [T - 1:0] tags1  [DEPTH - 1:0];
-    reg [1:0] valid [DEPTH - 1:0];
-    reg       lru   [DEPTH - 1:0];
+    reg [31:0] datas0 [DEPTH-1:0][D-1:0];
+    reg [31:0] datas1 [DEPTH-1:0][D-1:0];
+    reg [T-1:0] tags0 [DEPTH-1:0];
+    reg [T-1:0] tags1 [DEPTH-1:0];
+    reg [1:0] valid [DEPTH-1:0];
+    reg lru [DEPTH-1:0]; // stores the least-recently-used way
 
     // check there's a request
-    wire request = i_req_ren || i_req_wen;
-
     // tag, set, word breakdown:
     // TTT..(23)..TTTTSSSSSWW__
-    wire [S-1:0] set_num;
-    wire [T-1:0] tag_num;
-    wire [O-3:0] wrd_num;
-    assign wrd_num = i_req_addr[O-1:2];
-    assign set_num = i_req_addr[O+S-1:O];
-    assign tag_num = i_req_addr[31:O+S];
-
+    wire [S-1:0] req_set = i_req_addr[O+S-1:O];
+    wire [T-1:0] req_tag = i_req_addr[31:O+S];
+    wire [1:0] req_word = i_req_addr[3:2];
     // valid and tags match => Hit.
-    wire hit_0, hit_1, miss;
-    wire [31:0] cached_word;
-    assign hit_0 = valid[set_num][0] && (tags0[set_num] == tag_num);
-    assign hit_1 = valid[set_num][1] && (tags1[set_num] == tag_num);
-    assign miss  = !hit_0 && !hit_1;
-    // use of `miss` should prevent eroneous use of this term
-    assign cached_word = hit_1 ? datas1[set_num][wrd_num] : datas0[set_num][wrd_num];
-
-    // read/write manipulation mask 
+    wire hit0 = valid[req_set][0] && tags0[req_set] == req_tag;
+    wire hit1 = valid[req_set][1] && tags1[req_set] == req_tag;
+    wire hit = hit0 || hit1;
+    wire request = i_req_ren || i_req_wen;
+    // choose invalid if available; otherwise kick out NMRU way
+    wire victim = !valid[req_set][0] ? 1'b0 :
+                  !valid[req_set][1] ? 1'b1 : lru[req_set];
+    wire [31:0] hit_word = hit1 ? datas1[req_set][req_word] : datas0[req_set][req_word];
+    // read/write manipulation mask
     // for read:  (1 = take from cache,   0 = leave blank)
     // for write: (1 = take from request, 0 = take from cache)
-    wire [31:0] byte_mask = {
-        {8{i_req_mask[3]}}, {8{i_req_mask[2]}}, {8{i_req_mask[1]}}, {8{i_req_mask[0]}}
-    };
-    
+    wire [31:0] req_mask32 = {{8{i_req_mask[3]}}, {8{i_req_mask[2]}},
+                              {8{i_req_mask[1]}}, {8{i_req_mask[0]}}};
+
     // FSM shenanigans since fetching cache line can't be done in one swoop
-    // At it's core cache semantics consist of 3 primary steps:
+    // At its core cache semantics consist of 3 primary steps:
     // 1) check whether hit/miss (and which way) combinationally
-    // 2) if miss, fetch the cache line from memory, and track what was the allocated cache line 
-    //    (WA behavior, same in both R/W cases)
-    // 3) take either hit line, or the line that was populated after a miss, and then:
-    //    a) if read:  return the requested mem (masked word)
-    //    b) if write: write the masked word to the cache and memory (write-through)
-    localparam IDLE = 2'd0, MEM_FETCH = 2'd1, STORE = 2'd2;
-    reg [1:0] state;
-    wire [O-3:0] n_word_index; 
-    wire n_word_valid, m_fetch_done; 
-    wire [31:0] mem_fetch_addr;
-    reg mem_fetch_way, pending_write;
+    // 2) if miss, fetch the cache line from memory, and track what was
+    //    the allocated cache line (WA behavior, same in both R/W cases)
+    // 3) take either hit line, or the line that was populated after a miss:
+    //    a) if read: return the requested mem (masked word)
+    //    b) if write: write the masked word to cache and memory (write-through)
+    // Save request info so it stays stable while the CPU stalls.
+    reg [31:0] saved_addr, saved_wdata;
+    reg [3:0] saved_mask;
+    reg saved_way, saved_write;
+    reg [1:0] refill_word;
+    reg [31:0] store_word;
+    wire [S-1:0] saved_set = saved_addr[O+S-1:O];
+    wire [T-1:0] saved_tag = saved_addr[31:O+S];
+    wire [1:0] saved_word = saved_addr[3:2];
+    wire [31:0] saved_mask32 = {{8{saved_mask[3]}}, {8{saved_mask[2]}},
+                                {8{saved_mask[1]}}, {8{saved_mask[0]}}};
+    wire [31:0] selected_word = saved_way ? datas1[saved_set][saved_word] :
+                                            datas0[saved_set][saved_word];
+    wire [31:0] merged_word = (selected_word & ~saved_mask32) |
+                               (saved_wdata & saved_mask32);
+    wire [31:0] hit_merged_word = (hit_word & ~req_mask32) |
+                                   (i_req_wdata & req_mask32);
 
-    // more combinationally definable values 
-    wire store_request = state == STORE || (state == IDLE && i_req_wen && !miss);
-    wire victim = !valid[set_num][0] ? 1'b0 : // choose invalid if available
-                  !valid[set_num][1] ? 1'b1 : // "                         "
-                  lru[set_num];               // kick out LRU if both valid
-    assign o_res_rdata = cached_word & byte_mask; // mask out the bytes that aren't requested
+    // On a read hit the response is combinational. During/after a miss,
+    // the CPU holds the address and mask stable until o_busy falls.
+    assign o_res_rdata = hit_word & req_mask32;
+    assign o_busy = !i_rst && ((state == IDLE) ?
+                    (request && (!hit || i_req_wen)) : (state != COMPLETE));
 
-    // module to help w/ multi-step memory read for cache line fetch
-    // do memory fetch if it's a miss and there's a request (and we're currently idle (not sure if this needed))
-    wire mem_fetch_start = state == IDLE && request && miss;
-    cache_line_reader reader (
-        .i_clk(i_clk),                  // std boilerplate
-        .i_rst(i_rst),
-        .i_start(mem_fetch_start),    
-        .i_line_addr(i_req_addr[31:4]), // 16-byte granular addr 
-        .i_mem_ready(i_mem_ready),      // pass-thru mem interace (boilerplate)
-        .i_mem_valid(i_mem_valid),
-        .o_mem_ren(o_mem_ren),
-        .o_mem_addr(mem_fetch_addr),
-        .o_word_index(n_word_index),    // mem-cache interface: (word index) (which to read from mem / write to cache)
-        .o_word_valid(n_word_valid),    //                      (word valid)
-        .o_done(m_fetch_done)           //                      (done reading 4 words)
-    );
-    
-    assign o_mem_addr = (state == MEM_FETCH) ? mem_fetch_addr : i_req_addr;
-    // store if it's a store request and the memory's ready; only replace part that's masked for on store
-    assign o_mem_wen = !i_rst && store_request && i_mem_ready;
-    assign o_mem_wdata = (cached_word & ~byte_mask) | (i_req_wdata & byte_mask);
-    // busy if cache miss or store w/ mem not yet ready
-    assign o_busy = !i_rst && (state != IDLE || (request && miss) || (i_req_wen && !i_mem_ready));
+    // Memory commands are held asserted until the ready handshake.
+    assign o_mem_ren = !i_rst && (state == REFILL_REQ);
+    assign o_mem_wen = !i_rst && (state == STORE_REQ);
+    assign o_mem_addr = (state == REFILL_REQ || state == REFILL_WAIT) ?
+                        {saved_addr[31:4], refill_word, 2'b00} : saved_addr;
+    assign o_mem_wdata = store_word;
 
-    integer reset_set;
+    integer k;
     always @(posedge i_clk) begin
         if (i_rst) begin
             state <= IDLE;
-            // invalidate and reset LRU
-            for (reset_set = 0; reset_set < DEPTH; reset_set = reset_set + 1) begin
-                valid[reset_set] <= 2'b00;
-                lru[reset_set]   <= 1'b0;
+            saved_addr <= 32'b0;
+            saved_wdata <= 32'b0;
+            saved_mask <= 4'b0;
+            saved_way <= 1'b0;
+            saved_write <= 1'b0;
+            refill_word <= 2'b0;
+            store_word <= 32'b0;
+            for (k=0; k<DEPTH; k=k+1) begin
+                valid[k] <= 2'b00;
+                lru[k] <= 1'b0;
             end
         end else begin
             case (state)
-                // if miss: start fetch and move to MEM_FETCH state
-                // otherwise (hit): reset LRU and move to STORE state if write (WT)
-                IDLE: begin 
-                    if (mem_fetch_start) begin 
-                        mem_fetch_way <= victim;
-                        valid[set_num][victim] <= 1'b0;
-                        pending_write <= i_req_wen;
-                        state <= MEM_FETCH;
-                    end else if (request) begin
-                        lru[set_num] <= !hit_1;
-                        if (i_req_wen && !i_mem_ready)
-                            state <= STORE;
+                // if miss: start fetch and move to REFILL_REQ state
+                // otherwise (hit): update NMRU and write through if store
+                IDLE: begin
+                    if (request) begin
+                        if (hit) begin
+                            lru[req_set] <= hit0 ? 1'b1 : 1'b0;
+                            if (i_req_wen) begin
+                                saved_addr <= i_req_addr;
+                                saved_wdata <= i_req_wdata;
+                                saved_mask <= i_req_mask;
+                                saved_way <= hit1;
+                                saved_write <= 1'b1;
+                                store_word <= hit_merged_word;
+                                if (hit1)
+                                    datas1[req_set][req_word] <= hit_merged_word;
+                                else
+                                    datas0[req_set][req_word] <= hit_merged_word;
+                                state <= STORE_REQ;
+                            end
+                        end else begin
+                            saved_addr <= i_req_addr;
+                            saved_wdata <= i_req_wdata;
+                            saved_mask <= i_req_mask;
+                            saved_write <= i_req_wen;
+                            saved_way <= victim;
+                            refill_word <= 2'b00;
+                            valid[req_set][victim] <= 1'b0;
+                            state <= REFILL_REQ;
+                        end
                     end
                 end
-                // fetch cache line (logic module handle this, n_word_index tells where to write)
-                // once done (signaled by m_fetch_done), update line metadata and move to proper state 
-                // based on whether input was W (STORE) or R (IDLE)
-                MEM_FETCH: if (n_word_valid) begin
-                    if (mem_fetch_way)
-                        datas1[set_num][n_word_index] <= i_mem_rdata;
+                // Request one word of the missing cache line.
+                // Wait for memory to accept the read request.
+                REFILL_REQ: if (i_mem_ready) state <= REFILL_WAIT;
+                // Fetch cache line word by word; store each received word.
+                // Once done, update line metadata and choose read/write path.
+                REFILL_WAIT: if (i_mem_valid) begin
+                    if (saved_way)
+                        datas1[saved_set][refill_word] <= i_mem_rdata;
                     else
-                        datas0[set_num][n_word_index] <= i_mem_rdata;
-
-                    if (m_fetch_done) begin
-                        if (mem_fetch_way)
-                            tags1[set_num] <= tag_num;
-                        else
-                            tags0[set_num] <= tag_num;
-                        valid[set_num][mem_fetch_way] <= 1'b1;
-                        lru[set_num] <= !mem_fetch_way;
-                        state <= pending_write ? STORE : IDLE;
+                        datas0[saved_set][refill_word] <= i_mem_rdata;
+                    if (refill_word == 2'd3) begin
+                        if (saved_way) tags1[saved_set] <= saved_tag;
+                        else tags0[saved_set] <= saved_tag;
+                        valid[saved_set][saved_way] <= 1'b1;
+                        lru[saved_set] <= !saved_way;
+                        state <= saved_write ? WRITE_UPDATE : COMPLETE;
+                    end else begin
+                        refill_word <= refill_word + 2'd1;
+                        state <= REFILL_REQ;
                     end
                 end
-                // write to cache and memory (write-through): once done; move to IDLE state.
-                STORE: if (i_mem_ready)
-                    state <= IDLE;
+                // write to correct way at correct word, merging byte mask
+                WRITE_UPDATE: begin
+                    store_word <= merged_word;
+                    if (saved_way)
+                        datas1[saved_set][saved_word] <= merged_word;
+                    else
+                        datas0[saved_set][saved_word] <= merged_word;
+                    state <= STORE_REQ;
+                end
+                // write to cache and memory (write-through): once accepted,
+                // move to COMPLETE state.
+                STORE_REQ: if (i_mem_ready) state <= COMPLETE;
+                COMPLETE: state <= IDLE;
+                default: state <= IDLE;
             endcase
-            // write to correct way at correct word
-            if (o_mem_wen) begin
-                if (hit_1)
-                    datas1[set_num][wrd_num] <= o_mem_wdata;
-                else
-                    datas0[set_num][wrd_num] <= o_mem_wdata;
-            end
         end
     end
 endmodule
-
 `default_nettype wire
